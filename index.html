@@ -3,19 +3,181 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>Shelf Detect</title>
   <style>
-    body { margin: 0 auto; max-width: 900px; padding: 16px; font: 15px/1.5 system-ui, "Noto Sans Thai", sans-serif; }
-    canvas { max-width: 100%; height: auto; display: block; margin: 12px 0; background: #eee; }
-    pre { background: #f3f3f3; padding: 8px; overflow: auto; max-height: 300px; }
+    :root {
+      --bg: #f6f7f9; --panel: #fff; --ink: #16181d; --muted: #5f6673; --line: #e2e5ea;
+      --accent: #2f6fec; --accent-ink: #fff; --ok: #1f8a4c; --warn: #b26a00; --bad: #c23b3b;
+      --code: #f0f2f5; --chip: #eef2fb;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1115; --panel: #171a20; --ink: #e7e9ee; --muted: #9aa1ad; --line: #2a2f38;
+        --accent: #6c9bff; --accent-ink: #0f1115; --ok: #4fc283; --warn: #e2a53a; --bad: #ef6b6b;
+        --code: #1f232b; --chip: #1e2533;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans Thai", sans-serif; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+    header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+    h1 { margin: 0; font-size: 22px; }
+    h2 { margin: 0 0 10px; font-size: 17px; }
+    .sub, .muted { color: var(--muted); }
+    nav { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 12px 0 14px; }
+    nav a { color: var(--muted); padding: 8px 12px; text-decoration: none; border-bottom: 2px solid transparent; }
+    nav a[aria-current="page"] { color: var(--ink); border-color: var(--accent); font-weight: 600; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+    .grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 14px; align-items: start; }
+    @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .btn { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 7px; padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+    .btn.ghost { background: var(--chip); color: var(--ink); }
+    .btn:disabled, select:disabled, input:disabled { opacity: .5; cursor: not-allowed; }
+    select { font: inherit; padding: 7px 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+    .pill { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--chip); white-space: nowrap; }
+    .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 18px; text-align: center; color: var(--muted); cursor: pointer; }
+    .drop.over { border-color: var(--accent); color: var(--ink); background: var(--chip); }
+    .stage { position: relative; background: var(--code); border-radius: 8px; min-height: 220px; display: grid; place-items: center; overflow: hidden; }
+    .stage canvas, .stage video { max-width: 100%; height: auto; display: block; }
+    .stage .empty { color: var(--muted); padding: 40px 12px; text-align: center; }
+    progress { width: 100%; height: 10px; }
+    .status { margin: 6px 0 0; }
+    .status.bad { color: var(--bad); }
+    .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+    .stat { background: var(--code); border-radius: 8px; padding: 8px 10px; }
+    .stat b { display: block; font-size: 18px; overflow-wrap: anywhere; }
+    .stat span { font-size: 12px; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 600; font-size: 13px; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+    label.slider { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+    label.slider input { flex: 1; }
+    details pre { background: var(--code); padding: 8px; border-radius: 8px; overflow: auto; max-height: 280px; font-size: 12px; }
+    .samples { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+    .samples button { padding: 0; border: 2px solid transparent; border-radius: 6px; background: none; cursor: pointer; }
+    .samples img { width: 64px; height: 64px; object-fit: cover; border-radius: 4px; display: block; }
+    .samples button:focus-visible, .samples button:hover { border-color: var(--accent); }
+    [hidden] { display: none !important; }
+    a { color: var(--accent); }
+    footer { color: var(--muted); font-size: 13px; margin-top: 18px; }
   </style>
 </head>
 <body>
-  <h1>Shelf Detect</h1>
-  <p id="status"></p>
-  <input id="file" type="file" accept="image/*">
-  <canvas id="canvas" width="640" height="400"></canvas>
-  <pre id="out"></pre>
+  <div class="wrap">
+    <header>
+      <h1>Shelf Detect</h1>
+      <span class="sub">ตรวจจับสินค้าบนชั้นวาง 110 ชนิด · model รันใน browser รูปไม่ถูกส่งออกจากเครื่อง</span>
+    </header>
+    <nav>
+      <a href="#detect" id="navDetect" aria-current="page">ตรวจจับ</a>
+      <a href="#about" id="navAbout">เกี่ยวกับ</a>
+    </nav>
+
+    <main id="pageDetect">
+      <div class="card">
+        <div class="row">
+          <label for="backend" class="muted">Backend</label>
+          <select id="backend">
+            <option value="webgpu">WebGPU (ถ้ามี)</option>
+            <option value="wasm">WASM (ทุก browser)</option>
+          </select>
+          <span class="pill" id="agentPill">agent …</span>
+          <span class="pill" id="backendPill" hidden></span>
+        </div>
+        <progress id="progress" max="1" value="0" hidden></progress>
+        <p class="status" id="status" role="status" aria-live="polite">กำลังเตรียม…</p>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <div class="drop" id="drop" tabindex="0" role="button" aria-label="เลือกรูปหรือลากรูปมาวาง">
+            ลากรูปมาวางที่นี่ หรือ <u>เลือกรูป</u>
+            <input id="file" type="file" accept="image/*" hidden>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn ghost" id="sampleBtn" disabled>ใช้รูปตัวอย่าง</button>
+            <button class="btn ghost" id="cameraBtn" disabled>เปิดกล้อง</button>
+            <button class="btn" id="snapBtn" hidden>ถ่ายและตรวจ</button>
+            <button class="btn ghost" id="closeCamBtn" hidden>ปิดกล้อง</button>
+          </div>
+          <div class="samples" id="samples" hidden></div>
+          <div class="stage" style="margin-top:12px">
+            <canvas id="canvas" hidden aria-label="ผลการตรวจจับ"></canvas>
+            <video id="video" playsinline muted hidden></video>
+            <div class="empty" id="empty">ยังไม่มีรูป</div>
+          </div>
+          <label class="slider">
+            <span class="muted">ความมั่นใจขั้นต่ำ</span>
+            <input id="conf" type="range" min="0.05" max="0.95" step="0.05" value="0.25" disabled>
+            <b id="confVal">0.25</b>
+          </label>
+        </div>
+
+        <div class="card">
+          <h2>ผลลัพธ์</h2>
+          <div class="stats">
+            <div class="stat"><b id="statTotal">–</b><span>สินค้าที่เจอ</span></div>
+            <div class="stat"><b id="statLatency">–</b><span>ms ต่อรูป</span></div>
+            <div class="stat"><b id="statBackend">–</b><span>backend</span></div>
+          </div>
+          <p id="topLine" class="muted">มั่นใจที่สุด: –</p>
+          <table>
+            <thead><tr><th>สินค้า</th><th class="num">จำนวน</th><th class="num">มั่นใจสุด</th></tr></thead>
+            <tbody id="counts"><tr><td colspan="3" class="muted">–</td></tr></tbody>
+          </table>
+          <details style="margin-top:12px">
+            <summary class="muted">JSON ที่ agent คืนมา</summary>
+            <pre id="json">–</pre>
+          </details>
+        </div>
+      </div>
+    </main>
+
+    <main id="pageAbout" hidden>
+      <div class="card">
+        <h2>เกี่ยวกับ</h2>
+        <p>เว็บนี้ตรวจจับสินค้าบนชั้นวาง 110 ชนิดด้วย YOLOv8n ที่เทรนบน dataset Sell Products
+          แล้ว export เป็น ONNX ให้รันใน browser ด้วย onnxruntime-web (WebGPU หรือ WASM)
+          ไม่มี server รูปที่เลือกหรือถ่ายจะถูกประมวลผลในเครื่องนี้เท่านั้น</p>
+        <h2>ผลบน test set (567 รูป)</h2>
+        <table>
+          <thead><tr><th>Model</th><th class="num">mAP@0.5</th><th class="num">mAP@0.5:0.95</th><th class="num">Box F1</th><th class="num">ถูกระดับรูป</th><th class="num">ms/รูป (GPU)</th><th class="num">ขนาด (MB)</th></tr></thead>
+          <tbody>
+            <tr><td><b>YOLOv8n</b> (ตัวที่เว็บใช้)</td><td class="num">0.983</td><td class="num">0.969</td><td class="num">0.980</td><td class="num">0.998</td><td class="num">7.4</td><td class="num">6.3</td></tr>
+            <tr><td>YOLOv8s</td><td class="num">0.984</td><td class="num">0.977</td><td class="num">0.986</td><td class="num">0.998</td><td class="num">14.6</td><td class="num">21.6</td></tr>
+          </tbody>
+        </table>
+        <p class="muted">ms/รูป วัดบน GPU ของ Colab (model อย่างเดียว, median, batch 1) ความเร็วใน browser ขึ้นกับเครื่อง ดูได้จากช่อง "ms ต่อรูป" หลังตรวจ</p>
+        <p>รายงานฉบับเต็ม: <a href="https://github.com/ToonRz/retail-shelf-detection#readme">ToonRz/retail-shelf-detection</a>
+          · agent: <a href="https://github.com/ToonRz/retail-shelf-agent">ToonRz/retail-shelf-agent</a>
+          · เว็บ: <a href="https://github.com/ToonRz/retail-shelf-web">ToonRz/retail-shelf-web</a></p>
+        <h2>ที่มาและสัญญาอนุญาต</h2>
+        <ul>
+          <li>Dataset: <a href="https://universe.roboflow.com/o2o-minimart/sell-products">Sell Products – O2O Minimart</a> บน Roboflow Universe,
+            สัญญาอนุญาต <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a> · รูปตัวอย่างในเว็บนี้มาจาก test split ของ dataset นี้</li>
+          <li>Model: <a href="https://github.com/ultralytics/ultralytics">Ultralytics YOLOv8</a>, สัญญาอนุญาต <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPL-3.0</a></li>
+          <li>Runtime: <a href="https://github.com/microsoft/onnxruntime">ONNX Runtime Web</a> (MIT)</li>
+        </ul>
+        <p class="muted" id="aboutAgent"></p>
+      </div>
+      <div class="card">
+        <h2>วัดความเร็วเครื่องนี้</h2>
+        <p class="muted">ตรวจรูปตัวอย่าง 20 ครั้งต่อ backend (ไม่นับรอบอุ่นเครื่อง) แล้วรายงาน latency_ms ที่ agent วัด (preprocess + run + postprocess)</p>
+        <button class="btn" id="benchBtn" disabled>เริ่มวัด</button>
+        <table style="margin-top:10px">
+          <thead><tr><th>Backend</th><th class="num">เฉลี่ย (ms)</th><th class="num">median (ms)</th><th class="num">p90 (ms)</th><th class="num">โหลด model (ms)</th></tr></thead>
+          <tbody id="bench"><tr><td colspan="5" class="muted">ยังไม่ได้วัด</td></tr></tbody>
+        </table>
+        <p class="muted" id="benchUa"></p>
+      </div>
+    </main>
+
+    <footer>Shelf Detect · รันในเครื่องคุณทั้งหมด · <span id="footerVersion"></span></footer>
+  </div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

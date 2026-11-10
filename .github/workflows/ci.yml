@@ -13,5 +13,14 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: make fetch-agent-release (skipped when agent.version is mock)
+        run: make fetch-agent-release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: npm test
       - run: npm run build
+      - name: warn if a newer agent patch exists
+        run: make agent-lag
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

@@ -12,7 +12,7 @@
 | ค่า | ผล |
 |---|---|
 | `mock` | ใช้ `src/mockAgent.ts` (กล่องปลอม) — ใช้จนกว่าจะมี release แรก |
-| `vX.Y.Z` | โหลด `<base>agent/vX.Y.Z/shelf-agent.js` ซึ่ง `make fetch-agent-release` (งาน C2) วางไว้ใน `public/agent/vX.Y.Z/` ตอน build — ไม่ commit |
+| `vX.Y.Z` | โหลด `<base>agent/vX.Y.Z/shelf-agent.js` ซึ่ง `make fetch-agent-release` วางไว้ใน `public/agent/vX.Y.Z/` ตอน build — ไม่ commit |
 
 ค่าอื่นทำให้ build ล้ม (`vite.config.ts: readAgentVersion`) · เว็บคุยกับ agent ผ่าน `src/agent.ts` ที่เดียว ตาม interface ใน `src/agent-contract.ts`
 
@@ -25,12 +25,26 @@ npm test
 npm run build     # dist/ สำหรับ GitHub Pages
 ```
 
+## Agent release (SPEC §7)
+
+```bash
+make fetch-agent-release                  # ดึง release ตาม agent.version ลง public/agent/<v>/ แล้วตรวจ SHA256SUMS / manifest / contract
+make bump-agent                           # ไป patch ล่าสุดของ minor เดิม → npm test + npm run build (พังเมื่อไรคืน pin เดิม, ไม่ commit ให้)
+make bump-agent AGENT_VERSION=v0.2.0 ALLOW_MINOR=1   # ข้าม minor ต้องใส่ ALLOW_MINOR=1 · ถอยเวอร์ชันไม่ได้
+make agent-lag                            # บอกว่ามี patch ใหม่กว่า pin ไหม (CI ขึ้นเป็น warning)
+```
+
+ใช้ release ในเครื่องแทน GitHub ได้: `AGENT_RELEASES_DIR=../retail-shelf-agent/release make fetch-agent-release`
+(โฟลเดอร์ที่มี `vX.Y.Z/` จาก `npm run package` ของ agent) · โค้ดอยู่ที่ `scripts/agent-release.mjs` · test: `test/agent-release.test.ts`
+
+Deploy: push `main` → `.github/workflows/pages.yml` (`npm ci` → `make fetch-agent-release` → `npm test` → `npm run build` → Pages)
+
 ## สถานะ
 
 | ส่วน | สถานะ |
 |---|---|
 | pin `agent.version` + ตรวจรูปแบบ, `loadAgent()` (mock / release จริง), mock agent | ✅ มี test · ทดสอบใน browser แล้วว่าโหลด release จริงได้ถึงขั้น createSession |
-| หน้า UI จริง (อัปรูป / กล้อง / กล่อง / นับสินค้า / progress) | ⏳ งาน B |
-| `make bump-agent`, `make fetch-agent-release`, deploy Pages | ⏳ งาน C2, C3 |
-| GitHub Pages (Source: GitHub Actions) | ✅ เปิดแล้ว · เว็บจะขึ้นเมื่อมี `pages.yml` (C3) |
+| หน้า UI (อัปรูป / ลากวาง / รูปตัวอย่าง / กล้อง / เลือก backend / กล่องแยกสี / นับสินค้า / conf slider / progress / ข้อความ error ภาษาไทย / About / มือถือ + dark mode / วัดความเร็ว) | ✅ B1–B4, A5 · ทดสอบใน Chromium กับ release จริงแล้ว |
+| `make bump-agent`, `make fetch-agent-release`, deploy Pages, warning เมื่อ pin ตามหลัง patch ล่าสุด | ✅ C2, C3 · test ด้วย release ปลอม |
+| GitHub Pages (Source: GitHub Actions) | ✅ https://toonrz.github.io/retail-shelf-web/ |
 | bump ไป `v0.1.0` | ⛔ งาน T4 รอ release แรกของ agent |
