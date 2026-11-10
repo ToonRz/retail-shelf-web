@@ -32,3 +32,5 @@ npm run build     # dist/ สำหรับ GitHub Pages
 | pin `agent.version` + ตรวจรูปแบบ, `loadAgent()` (mock / release จริง), mock agent | ✅ มี test · ทดสอบใน browser แล้วว่าโหลด release จริงได้ถึงขั้น createSession |
 | หน้า UI จริง (อัปรูป / กล้อง / กล่อง / นับสินค้า / progress) | ⏳ งาน B |
 | `make bump-agent`, `make fetch-agent-release`, deploy Pages | ⏳ งาน C2, C3 |
+| GitHub Pages (Source: GitHub Actions) | ✅ เปิดแล้ว · เว็บจะขึ้นเมื่อมี `pages.yml` (C3) |
+| bump ไป `v0.1.0` | ⛔ งาน T4 รอ release แรกของ agent |
