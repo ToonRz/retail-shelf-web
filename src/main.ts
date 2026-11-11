@@ -10,12 +10,12 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 const ui = {
   backend: $<HTMLSelectElement>("backend"), agentPill: $("agentPill"), backendPill: $("backendPill"),
   progress: $<HTMLProgressElement>("progress"), status: $("status"),
-  drop: $("drop"), file: $<HTMLInputElement>("file"), sampleBtn: $<HTMLButtonElement>("sampleBtn"), samples: $("samples"),
+  drop: $("drop"), file: $<HTMLInputElement>("file"), pickBtn: $<HTMLButtonElement>("pickBtn"), samples: $("samples"), dock: $("dock"),
   cameraBtn: $<HTMLButtonElement>("cameraBtn"), snapBtn: $<HTMLButtonElement>("snapBtn"), closeCamBtn: $<HTMLButtonElement>("closeCamBtn"),
   canvas: $<HTMLCanvasElement>("canvas"), video: $<HTMLVideoElement>("video"), empty: $("empty"),
   conf: $<HTMLInputElement>("conf"), confVal: $("confVal"),
   statTotal: $("statTotal"), statLatency: $("statLatency"), statBackend: $("statBackend"), topLine: $("topLine"),
-  counts: $("counts"), json: $("json"), aboutAgent: $("aboutAgent"), footerVersion: $("footerVersion"),
+  counts: $("counts"), json: $("json"), aboutAgent: $("aboutAgent"),
 };
 
 let agent: Agent | null = null;
@@ -29,10 +29,7 @@ function setStatus(text: string, bad = false) {
 }
 
 function setReady(ready: boolean) {
-  for (const el of [ui.sampleBtn, ui.cameraBtn, ui.conf]) el.disabled = !ready;
-  ui.drop.setAttribute("aria-disabled", String(!ready));
-  ui.drop.style.pointerEvents = ready ? "" : "none";
-  ui.drop.style.opacity = ready ? "" : "0.5";
+  for (const el of [ui.pickBtn, ui.cameraBtn, ui.conf, ...ui.samples.querySelectorAll("button")]) el.disabled = !ready;
 }
 
 // ---------------------------------------------------------------- agent
@@ -57,7 +54,6 @@ async function initAgent(backend: Backend) {
     const fellBack = backend === "webgpu" && agent.backend !== "webgpu";
     setStatus(`พร้อมใช้ · ${m.model.name} (${m.model.classes} คลาส, ${m.model.dataset})${fellBack ? " · เครื่องนี้ไม่มี WebGPU จึงใช้ WASM แทน" : ""}`);
     ui.aboutAgent.textContent = `agent ${m.version} · model ${m.model.name} · ${m.model.classes} คลาส · backend ${agent.backend}`;
-    ui.footerVersion.textContent = `agent ${m.version}`;
     setReady(true);
     if (image) await run();
   } catch (e) {
@@ -71,6 +67,7 @@ async function initAgent(backend: Backend) {
 // ---------------------------------------------------------------- detect + draw
 
 async function show(bitmap: ImageBitmap) {
+  if (stream) closeCamera();
   image?.close();
   image = bitmap;
   await run();
@@ -79,6 +76,7 @@ async function show(bitmap: ImageBitmap) {
 async function run() {
   if (!agent || !image || busy) return;
   busy = true;
+  ui.drop.classList.add("busy");
   try {
     const r = await agent.detect(image, { conf: Number(ui.conf.value) });
     draw(image, r);
@@ -87,6 +85,7 @@ async function run() {
     setStatus(`ตรวจไม่สำเร็จ: ${errorMessage(e)}`, true);
   } finally {
     busy = false;
+    ui.drop.classList.remove("busy");
   }
 }
 
@@ -117,6 +116,11 @@ function draw(img: ImageBitmap, r: DetectResult) {
   c.hidden = false;
   ui.video.hidden = true;
   ui.empty.hidden = true;
+  if (ui.samples.parentElement !== ui.dock) { // first result: samples leave the empty stage for the tray
+    const focused = document.activeElement as HTMLElement | null;
+    ui.dock.append(ui.samples);
+    focused?.focus({ preventScroll: true });
+  }
 }
 
 function render(r: DetectResult) {
@@ -158,12 +162,11 @@ async function fromUrl(url: string) {
   await show(await createImageBitmap(await res.blob()));
 }
 
-ui.drop.addEventListener("click", () => ui.file.click());
-ui.drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); ui.file.click(); } });
+ui.pickBtn.addEventListener("click", () => ui.file.click());
 ui.file.addEventListener("change", () => { void fromFile(ui.file.files?.[0]); ui.file.value = ""; });
-for (const ev of ["dragenter", "dragover"]) ui.drop.addEventListener(ev, (e) => { e.preventDefault(); ui.drop.classList.add("over"); });
+for (const ev of ["dragenter", "dragover"]) ui.drop.addEventListener(ev, (e) => { e.preventDefault(); ui.drop.classList.toggle("over", agent !== null); });
 for (const ev of ["dragleave", "drop"]) ui.drop.addEventListener(ev, () => ui.drop.classList.remove("over"));
-ui.drop.addEventListener("drop", (e) => { e.preventDefault(); void fromFile(e.dataTransfer?.files?.[0]); });
+ui.drop.addEventListener("drop", (e) => { e.preventDefault(); if (agent) void fromFile(e.dataTransfer?.files?.[0]); });
 document.addEventListener("paste", (e) => {
   const item = [...(e.clipboardData?.items ?? [])].find((i) => i.type.startsWith("image/"));
   if (item && agent) void fromFile(item.getAsFile() ?? undefined);
@@ -179,10 +182,6 @@ ui.samples.replaceChildren(...SAMPLES.map((f) => {
   b.addEventListener("click", () => { if (agent) void fromUrl(sampleUrl(f)); });
   return b;
 }));
-ui.sampleBtn.addEventListener("click", () => {
-  ui.samples.hidden = false;
-  void fromUrl(sampleUrl(SAMPLES[Math.floor(Math.random() * SAMPLES.length)]));
-});
 
 async function openCamera() {
   if (!navigator.mediaDevices?.getUserMedia) { setStatus("browser นี้ใช้กล้องไม่ได้ (ต้องเปิดผ่าน https)", true); return; }
@@ -208,7 +207,7 @@ function closeCamera() {
   ui.video.hidden = true;
   ui.snapBtn.hidden = ui.closeCamBtn.hidden = true;
   ui.cameraBtn.hidden = false;
-  if (ui.canvas.hidden) ui.empty.hidden = false;
+  if (image) ui.canvas.hidden = false; else ui.empty.hidden = false;
 }
 
 ui.cameraBtn.addEventListener("click", () => void openCamera());
