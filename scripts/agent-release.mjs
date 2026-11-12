@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Pin / fetch / bump the agent release (SPEC §7). Used by the Makefile:
 //
-//   node scripts/agent-release.mjs fetch                 # make fetch-agent-release
+//   node scripts/agent-release.mjs fetch                 # make fetch-agent-release (agent.version + agent-shelf.version)
 //   node scripts/agent-release.mjs bump [--version vX.Y.Z] [--allow-minor]   # make bump-agent
 //   node scripts/agent-release.mjs lag                   # CI: warn when a newer patch exists
 //
@@ -207,11 +207,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const cmd = positionals[0];
   try {
     if (cmd === "fetch") {
-      const pin = readPin();
-      if (pin === "mock") console.log("agent.version is mock: nothing to fetch");
-      else {
-        const m = await fetchAgentRelease({ version: pin });
-        console.log(`public/agent/${pin}/ ok: ${Object.keys(m.files).length} files, contract ${m.contract}, model ${m.model.name} (${m.model.classes} classes)`);
+      for (const file of ["agent.version", "agent-shelf.version"]) {
+        const pin = readPin(file);
+        if (pin === "mock") console.log(`${file} is mock: nothing to fetch`);
+        else {
+          const m = await fetchAgentRelease({ version: pin });
+          console.log(`public/agent/${pin}/ ok: ${Object.keys(m.files).length} files, contract ${m.contract}, model ${m.model.name} (${m.model.classes} classes)`);
+        }
       }
     } else if (cmd === "bump") {
       await bumpAgent({ requested: values.version || undefined, allowMinor: values["allow-minor"] || process.env.ALLOW_MINOR === "1" });

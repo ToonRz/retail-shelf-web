@@ -14,6 +14,9 @@
 | `mock` | ใช้ `src/mockAgent.ts` (กล่องปลอม) — ใช้จนกว่าจะมี release แรก |
 | `vX.Y.Z` | โหลด `<base>agent/vX.Y.Z/shelf-agent.js` ซึ่ง `make fetch-agent-release` วางไว้ใน `public/agent/vX.Y.Z/` ตอน build — ไม่ commit |
 
+`agent-shelf.version` ใช้กติกาเดียวกัน สำหรับหน้า "เฝ้าชั้นวาง" (`#watch`): agent สาย `v0.2.x` ที่มี model 1 คลาส `product` (SKU-110K)
+`make fetch-agent-release` ดึงทั้งสองเวอร์ชัน · `make bump-agent` ขยับแค่ `agent.version`
+
 ค่าอื่นทำให้ build ล้ม (`vite.config.ts: readAgentVersion`) · เว็บคุยกับ agent ผ่าน `src/agent.ts` ที่เดียว ตาม interface ใน `src/agent-contract.ts`
 
 ## Dev
@@ -48,3 +51,4 @@ Deploy: push `main` → `.github/workflows/pages.yml` (`npm ci` → `make fetch-
 | `make bump-agent`, `make fetch-agent-release`, deploy Pages, warning เมื่อ pin ตามหลัง patch ล่าสุด | ✅ C2, C3 · test ด้วย release ปลอม |
 | GitHub Pages (Source: GitHub Actions) | ✅ https://toonrz.github.io/retail-shelf-web/ |
 | bump ไป `v0.1.0` | ✅ T4 (2026-11-10): `agent.version` = `v0.1.0` (model จริง 110 คลาส) |
+| หน้าเฝ้าชั้นวาง `#watch` (วาดช่อง / กล้องหรือไฟล์วิดีโอ / เตือนของหมดหลังว่างนาน N วินาที / หยุดนับตอนมีคนบัง / เสียง + notification) | ✅ (2026-11-12) `agent-shelf.version` = `v0.2.0` · ตรรกะมี test (`test/watch.test.ts`) · ทดสอบใน Chromium (WebGPU) กับวิดีโอทดสอบ: เตือนครบ 6 ช่อง ไม่มีเตือนก่อนของหมดจริง ช้ากว่าเวลาที่ตั้ง 2–20 วินาที |

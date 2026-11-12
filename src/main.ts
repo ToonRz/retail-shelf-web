@@ -2,6 +2,7 @@
 import type { Agent, Backend, DetectResult } from "./agent-contract";
 import { AGENT_VERSION, loadAgent } from "./agent";
 import { classColor, countByClass, errorMessage, formatMB, prettyName, topBox } from "./ui/logic";
+import { openWatch } from "./watch";
 
 // Test-split images of the dataset (CC BY 4.0, see About). public/samples/
 const SAMPLES = ["lays.jpg", "hanami.jpg", "pocky.jpg", "copp.jpg"];
@@ -268,15 +269,16 @@ benchBtn.addEventListener("click", async () => {
   benchBtn.disabled = false;
 });
 
-// ---------------------------------------------------------------- pages (#detect / #about)
+// ---------------------------------------------------------------- pages (#detect / #watch / #about)
 
 function route() {
-  const about = location.hash === "#about";
-  $("pageDetect").hidden = about;
-  $("pageAbout").hidden = !about;
-  $("navDetect").toggleAttribute("aria-current", !about);
-  $("navAbout").toggleAttribute("aria-current", about);
-  if (about) $("navAbout").setAttribute("aria-current", "page"); else $("navDetect").setAttribute("aria-current", "page");
+  const page = location.hash === "#about" ? "About" : location.hash === "#watch" ? "Watch" : "Detect";
+  for (const name of ["Detect", "Watch", "About"]) {
+    $(`page${name}`).hidden = name !== page;
+    $(`nav${name}`).toggleAttribute("aria-current", name === page);
+    if (name === page) $(`nav${name}`).setAttribute("aria-current", "page");
+  }
+  if (page === "Watch") void openWatch();
 }
 window.addEventListener("hashchange", route);
 route();

@@ -112,6 +112,25 @@
     #counts td:nth-child(2) { font-size: 17px; font-weight: 700; }
     .swatch { display: inline-block; width: 6px; height: 18px; margin-right: 10px; border-radius: 1px; vertical-align: middle; }
 
+    /* shelf watch */
+    #watchOverlay { touch-action: none; }
+    #watchOverlay.drawable { cursor: crosshair; }
+    .alert-banner { padding: 10px 16px; background: var(--bad); color: #fff; font-weight: 700; overflow-wrap: anywhere; }
+    .watch-sliders { display: flex; flex: 1 1 100%; flex-wrap: wrap; gap: 8px 16px; }
+    .watch-sliders .slider { flex: 1 1 220px; margin: 0; }
+    .slot-name { width: 100%; min-height: 32px; padding: 0 6px; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+    .slot-stocked { color: #2fa45a; font-weight: 600; }
+    .slot-checking { color: #b98500; font-weight: 600; }
+    .slot-out { color: var(--bad); font-weight: 700; }
+    .link { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; }
+    .link:disabled { opacity: .5; cursor: not-allowed; }
+    .alert-log { margin: 0; padding: 8px 16px; list-style: none; font-size: 13px; }
+    .alert-log li { padding: 3px 0; }
+    .watch-alerts { padding: 10px 16px; border-top: 1px solid var(--line); }
+    .watch-alerts label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+    #pageWatch .list { flex: 0 1 auto; }
+    #pageWatch .alert-log { flex: 1; min-height: 80px; overflow: auto; border-top: 1px solid var(--line); }
+
     /* about: headings in their own track, content beside them */
     .doc { max-width: 1040px; margin: 0 auto; padding: 8px 16px 40px; }
     .doc section { display: grid; gap: 8px; padding: 24px 0; border-bottom: 1px solid var(--line); }
@@ -152,6 +171,7 @@
     <h1 class="brand">Shelf Detect</h1>
     <nav aria-label="หน้า">
       <a href="#detect" id="navDetect" aria-current="page">ตรวจจับ</a>
+      <a href="#watch" id="navWatch">เฝ้าชั้นวาง</a>
       <a href="#about" id="navAbout">เกี่ยวกับ</a>
     </nav>
     <p class="promise">ตรวจจับสินค้าบนชั้นวาง 110 ชนิด · model รันใน browser รูปไม่ถูกส่งออกจากเครื่อง</p>
@@ -222,6 +242,67 @@
     </div>
   </main>
 
+  <main id="pageWatch" class="bench" hidden>
+    <div class="stage" id="watchStage">
+      <video id="watchVideo" playsinline muted hidden></video>
+      <canvas id="watchOverlay" hidden aria-label="ภาพชั้นวางและกรอบแต่ละช่อง"></canvas>
+      <div class="empty" id="watchEmpty">
+        <p class="empty-title">เฝ้าชั้นวางและแจ้งเตือนเมื่อของหมด</p>
+        <p>เปิดกล้องที่ตั้งนิ่ง ๆ หรือเลือกวิดีโอ แล้วลากกรอบรอบสินค้าแต่ละชนิด</p>
+        <p class="fine">ภาพถูกประมวลผลในเครื่องนี้เท่านั้น ไม่ถูกส่งออกไปไหน</p>
+      </div>
+    </div>
+
+    <div class="tray">
+      <div class="actions">
+        <button class="btn ghost" id="watchCamBtn" type="button" disabled>เปิดกล้อง</button>
+        <button class="btn ghost" id="watchFileBtn" type="button" disabled>เลือกวิดีโอ</button>
+        <input id="watchFile" type="file" accept="video/*" hidden>
+        <button class="btn" id="watchStartBtn" type="button" disabled>เริ่มเฝ้า</button>
+        <button class="btn ghost" id="watchClearBtn" type="button" disabled>ลบทุกช่อง</button>
+      </div>
+      <div class="watch-sliders">
+        <label class="slider">
+          <span class="muted">เตือนเมื่อว่างนาน (วินาที)</span>
+          <input id="watchHold" type="range" min="5" max="120" step="5" value="15">
+          <b id="watchHoldVal">15</b>
+        </label>
+        <label class="slider">
+          <span class="muted">ความมั่นใจขั้นต่ำ</span>
+          <!-- 0.15: on the test video a lone pack lying flat scored 0.20 and empty slots had no box even at 0.05 -->
+          <input id="watchConf" type="range" min="0.05" max="0.95" step="0.05" value="0.15">
+          <b id="watchConfVal">0.15</b>
+        </label>
+      </div>
+    </div>
+
+    <aside class="rail" aria-label="สถานะชั้นวาง">
+      <div class="alert-banner" id="watchBanner" role="alert" hidden></div>
+      <div class="tally">
+        <h2>สถานะชั้นวาง</h2>
+        <div class="total"><b id="watchOutCount">0</b><span>ช่องที่ของหมด</span></div>
+        <div class="stats"><span><b id="watchLatency">–</b> ms ต่อรอบ</span></div>
+      </div>
+      <div class="list">
+        <table>
+          <thead><tr><th>สินค้า</th><th>สถานะ</th><th></th></tr></thead>
+          <tbody id="watchSlots"></tbody>
+        </table>
+      </div>
+      <ul class="alert-log" id="watchLog"><li class="muted placeholder">ยังไม่มีการแจ้งเตือน</li></ul>
+      <div class="watch-alerts">
+        <label><input id="watchSound" type="checkbox" checked> เสียงเตือน</label>
+        <button class="link" id="watchNotifyBtn" type="button">เปิดแจ้งเตือนของ browser</button>
+      </div>
+    </aside>
+
+    <div class="status-bar">
+      <progress id="watchProgress" max="1" value="0" hidden></progress>
+      <p class="status" id="watchStatus" role="status" aria-live="polite">กำลังเตรียม…</p>
+      <span class="meta" id="watchPill">agent …</span>
+    </div>
+  </main>
+
   <main id="pageAbout" class="doc" hidden>
     <section>
       <h2>เกี่ยวกับ</h2>
@@ -229,6 +310,9 @@
         <p>เว็บนี้ตรวจจับสินค้าบนชั้นวาง 110 ชนิดด้วย YOLOv8n ที่เทรนบน dataset Sell Products
           แล้ว export เป็น ONNX ให้รันใน browser ด้วย onnxruntime-web (WebGPU หรือ WASM)
           ไม่มี server รูปที่เลือกหรือถ่ายจะถูกประมวลผลในเครื่องนี้เท่านั้น</p>
+        <p>หน้า "เฝ้าชั้นวาง" ใช้อีก model หนึ่ง: YOLOv8n คลาสเดียว (<code>product</code>) ที่เทรนบนรูปชั้นวางของ SKU-110K
+          ตรวจแต่ละช่องที่วาดไว้ทุก 1 วินาที ถ้าช่องว่างนานเกินเวลาที่ตั้งจะแจ้งเตือนว่าของหมด
+          ช่วงที่มีคนบังช่อง (ภาพเปลี่ยนมาก) จะหยุดนับเวลา</p>
         <p class="muted" id="aboutAgent"></p>
       </div>
     </section>
@@ -266,6 +350,8 @@
         <ul>
           <li>Dataset: <a href="https://universe.roboflow.com/o2o-minimart/sell-products">Sell Products – O2O Minimart</a> บน Roboflow Universe,
             สัญญาอนุญาต <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a> · รูปตัวอย่างในเว็บนี้มาจาก test split ของ dataset นี้</li>
+          <li>Dataset ของหน้าเฝ้าชั้นวาง: <a href="https://github.com/eg4000/SKU110K_CVPR19">SKU-110K</a> (Trax),
+            ใช้ได้เพื่อการศึกษาและไม่ใช่เชิงพาณิชย์เท่านั้น · ไม่มีรูปของ dataset นี้ในเว็บ</li>
           <li>Model: <a href="https://github.com/ultralytics/ultralytics">Ultralytics YOLOv8</a>, สัญญาอนุญาต <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPL-3.0</a></li>
           <li>Runtime: <a href="https://github.com/microsoft/onnxruntime">ONNX Runtime Web</a> (MIT)</li>
         </ul>
