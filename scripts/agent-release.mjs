@@ -12,6 +12,7 @@ import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 export const SUPPORTED_CONTRACTS = ["shelf-agent-js/1"]; // = src/agent-contract.ts
@@ -199,7 +200,8 @@ export async function lag({ versionFile = "agent.version", source = defaultSourc
 
 // ---------------------------------------------------------------- CLI
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL: a plain `file://${argv[1]}` never matches on Windows (C:\ backslashes, non-ASCII paths are %-encoded)
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: { version: { type: "string" }, "allow-minor": { type: "boolean", default: false } },
