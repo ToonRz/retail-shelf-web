@@ -3,6 +3,7 @@ import type { Agent, Backend, DetectResult } from "./agent-contract";
 import { AGENT_VERSION, loadAgent } from "./agent";
 import { classColor, countByClass, errorMessage, formatMB, prettyName, topBox } from "./ui/logic";
 import { openWatch } from "./watch";
+import { setupLive } from "./live";
 
 // Test-split images of the dataset (CC BY 4.0, see About). public/samples/
 const SAMPLES = ["lays.jpg", "hanami.jpg", "pocky.jpg", "copp.jpg"];
@@ -17,6 +18,7 @@ const ui = {
   conf: $<HTMLInputElement>("conf"), confVal: $("confVal"),
   statTotal: $("statTotal"), statLatency: $("statLatency"), statBackend: $("statBackend"), topLine: $("topLine"),
   counts: $("counts"), json: $("json"), aboutAgent: $("aboutAgent"),
+  liveBtn: $<HTMLButtonElement>("liveBtn"), liveOverlay: $<HTMLCanvasElement>("liveOverlay"), liveHud: $("liveHud"),
 };
 
 let agent: Agent | null = null;
@@ -30,7 +32,7 @@ function setStatus(text: string, bad = false) {
 }
 
 function setReady(ready: boolean) {
-  for (const el of [ui.pickBtn, ui.cameraBtn, ui.conf, ...ui.samples.querySelectorAll("button")]) el.disabled = !ready;
+  for (const el of [ui.pickBtn, ui.cameraBtn, ui.liveBtn, ui.conf, ...ui.samples.querySelectorAll("button")]) el.disabled = !ready;
 }
 
 // ---------------------------------------------------------------- agent
@@ -38,6 +40,7 @@ function setReady(ready: boolean) {
 async function initAgent(backend: Backend) {
   setReady(false);
   ui.backend.disabled = true;
+  await live.stop(); // the live loop must not call an agent that is being disposed
   if (agent) { await agent.dispose(); agent = null; }
   ui.agentPill.textContent = `agent ${AGENT_VERSION}`;
   ui.backendPill.hidden = true;
@@ -75,7 +78,7 @@ async function show(bitmap: ImageBitmap) {
 }
 
 async function run() {
-  if (!agent || !image || busy) return;
+  if (!agent || !image || busy || live.isRunning()) return; // live mode owns the agent and the stage
   busy = true;
   ui.drop.classList.add("busy");
   try {
@@ -197,22 +200,29 @@ async function openCamera() {
   ui.video.hidden = false;
   ui.canvas.hidden = true;
   ui.empty.hidden = true;
-  ui.snapBtn.hidden = ui.closeCamBtn.hidden = false;
+  ui.snapBtn.hidden = ui.closeCamBtn.hidden = ui.liveBtn.hidden = false;
   ui.cameraBtn.hidden = true;
 }
 
 function closeCamera() {
+  void live.stop();
   stream?.getTracks().forEach((t) => t.stop());
   stream = null;
   ui.video.srcObject = null;
   ui.video.hidden = true;
-  ui.snapBtn.hidden = ui.closeCamBtn.hidden = true;
+  ui.snapBtn.hidden = ui.closeCamBtn.hidden = ui.liveBtn.hidden = true;
   ui.cameraBtn.hidden = false;
   if (image) ui.canvas.hidden = false; else ui.empty.hidden = false;
 }
 
 ui.cameraBtn.addEventListener("click", () => void openCamera());
 ui.closeCamBtn.addEventListener("click", closeCamera);
+
+// I2: detect every frame from the open camera (src/live.ts)
+const live = setupLive({
+  video: ui.video, overlay: ui.liveOverlay, hud: ui.liveHud, button: ui.liveBtn,
+  getAgent: () => agent, getConf: () => Number(ui.conf.value), onResult: render, onStatus: setStatus,
+});
 ui.snapBtn.addEventListener("click", async () => {
   if (!ui.video.videoWidth) return;
   const frame = await createImageBitmap(ui.video);
