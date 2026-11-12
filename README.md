@@ -16,6 +16,7 @@
 
 `agent-shelf.version` ใช้กติกาเดียวกัน สำหรับหน้า "เฝ้าชั้นวาง" (`#watch`): agent สาย `v0.2.x` ที่มี model 1 คลาส `product` (SKU-110K)
 `make fetch-agent-release` ดึงทั้งสองเวอร์ชัน · `make bump-agent` ขยับแค่ `agent.version`
+`agent.version` ใช้สาย `v0.3.x` (model 110 คลาส + shelf model ใน release เดียว) · หน้าเฝ้าชั้นวางไม่ต้องใช้ `v0.3.x` เพราะนับแค่ว่ามีกล่องหรือไม่
 
 ค่าอื่นทำให้ build ล้ม (`vite.config.ts: readAgentVersion`) · เว็บคุยกับ agent ผ่าน `src/agent.ts` ที่เดียว ตาม interface ใน `src/agent-contract.ts`
 
@@ -51,4 +52,5 @@ Deploy: push `main` → `.github/workflows/pages.yml` (`npm ci` → `make fetch-
 | `make bump-agent`, `make fetch-agent-release`, deploy Pages, warning เมื่อ pin ตามหลัง patch ล่าสุด | ✅ C2, C3 · test ด้วย release ปลอม |
 | GitHub Pages (Source: GitHub Actions) | ✅ https://toonrz.github.io/retail-shelf-web/ |
 | bump ไป `v0.1.0` | ✅ T4 (2026-11-10): `agent.version` = `v0.1.0` (model จริง 110 คลาส) |
+| bump ไป `v0.3.1` (รวม 2 model) | ✅ (2026-11-12): `agent.version` = `v0.3.1` · หน้าตรวจจับได้ชื่อสินค้า 110 คลาสเหมือนเดิม + กล่อง `product` (classId 110) สำหรับของที่ model 110 คลาสไม่รู้จัก · รัน 2 model ต่อรูป จึงช้ากว่า v0.1.0 ราว 2 เท่า · ทดสอบใน Chromium (WASM) กับรูปตัวอย่างแล้ว · หน้าเฝ้าชั้นวางยังอยู่ที่ `v0.2.1` |
 | หน้าเฝ้าชั้นวาง `#watch` (วาดช่อง / กล้องหรือไฟล์วิดีโอ / เตือนของหมดหลังว่างนาน N วินาที / หยุดนับตอนมีคนบัง / เสียง + notification) | ✅ (2026-11-12) `agent-shelf.version` = `v0.2.1` (shelf model v2, 30 epoch) · ตรรกะมี test (`test/watch.test.ts`) · ทดสอบใน Chromium (WebGPU) กับวิดีโอทดสอบที่ conf 0.25: เตือนครบ 6 ช่อง ไม่มีเตือนก่อนของหมดจริง ช้ากว่าเวลาที่ตั้ง 2.5–21.5 วินาที |
