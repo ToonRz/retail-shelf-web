@@ -1,6 +1,8 @@
 // Detection page (task B). Talks to the agent only through loadAgent() / the Agent interface.
 import type { Agent, Backend, DetectResult } from "./agent-contract";
 import { AGENT_VERSION, loadAgent } from "./agent";
+import { initBatch } from "./batch";
+import { ensureAgentCached, initServiceWorker } from "./sw-cache";
 import { classColor, countByClass, errorMessage, formatMB, prettyName, topBox } from "./ui/logic";
 import { openWatch } from "./watch";
 
@@ -31,6 +33,8 @@ function setStatus(text: string, bad = false) {
 
 function setReady(ready: boolean) {
   for (const el of [ui.pickBtn, ui.cameraBtn, ui.conf, ...ui.samples.querySelectorAll("button")]) el.disabled = !ready;
+  const b = $<HTMLButtonElement>("batchPickBtn"); if (b) b.disabled = !ready;
+  const m = $<HTMLButtonElement>("multiPickBtn"); if (m) m.disabled = !ready;
 }
 
 // ---------------------------------------------------------------- agent
@@ -56,6 +60,7 @@ async function initAgent(backend: Backend) {
     setStatus(`พร้อมใช้ · ${m.model.name} (${m.model.classes} คลาส, ${m.model.dataset})${fellBack ? " · เครื่องนี้ไม่มี WebGPU จึงใช้ WASM แทน" : ""}`);
     ui.aboutAgent.textContent = `agent ${m.version} · model ${m.model.name} · ${m.model.classes} คลาส · backend ${agent.backend}`;
     setReady(true);
+    void ensureAgentCached(AGENT_VERSION, SAMPLES);
     if (image) await run();
   } catch (e) {
     setStatus(`โหลด agent ไม่ได้: ${errorMessage(e)}`, true);
@@ -269,11 +274,11 @@ benchBtn.addEventListener("click", async () => {
   benchBtn.disabled = false;
 });
 
-// ---------------------------------------------------------------- pages (#detect / #watch / #about)
+// ---------------------------------------------------------------- pages (#detect / #batch / #watch / #about)
 
 function route() {
-  const page = location.hash === "#about" ? "About" : location.hash === "#watch" ? "Watch" : "Detect";
-  for (const name of ["Detect", "Watch", "About"]) {
+  const page = location.hash === "#about" ? "About" : location.hash === "#watch" ? "Watch" : location.hash === "#batch" ? "Batch" : "Detect";
+  for (const name of ["Detect", "Batch", "Watch", "About"]) {
     $(`page${name}`).hidden = name !== page;
     $(`nav${name}`).toggleAttribute("aria-current", name === page);
     if (name === page) $(`nav${name}`).setAttribute("aria-current", "page");
@@ -287,3 +292,5 @@ let saved: string | null = null;
 try { saved = localStorage.getItem("backend"); } catch { /* private mode */ }
 if (saved === "wasm" || saved === "webgpu") ui.backend.value = saved;
 void initAgent(ui.backend.value as Backend);
+initBatch(() => agent, ui.conf);
+initServiceWorker(AGENT_VERSION);

@@ -1,0 +1,8 @@
+file,product,count,max_conf
+"shelf, ""snack aisle"".jpg",lays chili squid,1,0.98
+pocky_display.jpg,pocky,1,0.99
+pocky_display.jpg,product,1,0.48
+hanami_box.jpg,ha na mi chile,1,0.90
+hanami_box.jpg,product,1,0.52
+empty_shelf.jpg,(none),0,0.00
+
