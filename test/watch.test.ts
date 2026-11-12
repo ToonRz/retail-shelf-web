@@ -100,4 +100,19 @@ describe("drawing", () => {
       ["s3", "ช่อง 3", 9, 49],
     ]);
   });
+  it("uses the 110-class product name when recognized and falls back to 'ช่อง N' for generic 'product'", () => {
+    let n = 0;
+    const slots = boxesToSlots(
+      [
+        { cls: "lays-salt", classId: 46, conf: 0.92, xyxy: [100, 100, 300, 300] },
+        { cls: "product", classId: 110, conf: 0.80, xyxy: [500, 100, 700, 300] },
+      ],
+      1000,
+      1000,
+      0.05,
+      0.03,
+      () => `s${++n}`,
+    );
+    expect(slots.map((s) => s.name)).toEqual(["lays salt", "ช่อง 2"]);
+  });
 });

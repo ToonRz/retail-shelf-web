@@ -1,5 +1,6 @@
 // Pure logic of the shelf watch page (src/watch.ts), unit-tested in test/watch.test.ts.
 import type { Box } from "../agent-contract";
+import { prettyName } from "./logic";
 
 export type Rect = [number, number, number, number]; // x, y, w, h as fractions of the frame
 export interface Slot { id: string; name: string; rect: Rect }
@@ -82,8 +83,8 @@ export function boxesToSlots(
   makeId: () => string = () => crypto.randomUUID(),
 ): Slot[] {
   if (!(frameW > 0 && frameH > 0)) return [];
-  const rects: Rect[] = [];
-  for (const { xyxy: [x1, y1, x2, y2] } of boxes) {
+  const items: Array<{ rect: Rect; cls: string }> = [];
+  for (const { cls, xyxy: [x1, y1, x2, y2] } of boxes) {
     const bw = x2 - x1, bh = y2 - y1;
     const px = bw * pad, py = bh * pad;
     const r = dragToRect(
@@ -93,14 +94,18 @@ export function boxesToSlots(
       Math.min(1, (y2 + py) / frameH),
       minSize,
     );
-    if (r) rects.push(r);
+    if (r) items.push({ rect: r, cls });
   }
-  rects.sort((a, b) => {
-    const cyA = a[1] + a[3] / 2, cyB = b[1] + b[3] / 2;
-    const sameRow = Math.abs(cyA - cyB) < Math.min(a[3], b[3]) * 0.5;
-    return sameRow ? a[0] - b[0] : cyA - cyB;
+  items.sort((a, b) => {
+    const cyA = a.rect[1] + a.rect[3] / 2, cyB = b.rect[1] + b.rect[3] / 2;
+    const sameRow = Math.abs(cyA - cyB) < Math.min(a.rect[3], b.rect[3]) * 0.5;
+    return sameRow ? a.rect[0] - b.rect[0] : cyA - cyB;
   });
-  return rects.map((rect, i) => ({ id: makeId(), name: `ช่อง ${i + 1}`, rect }));
+  return items.map(({ rect, cls }, i) => ({
+    id: makeId(),
+    name: cls && cls !== "product" ? prettyName(cls) : `ช่อง ${i + 1}`,
+    rect,
+  }));
 }
 
 /** Slots saved in localStorage; anything malformed is dropped instead of breaking the page. */

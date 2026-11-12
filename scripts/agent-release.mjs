@@ -12,6 +12,7 @@ import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 export const SUPPORTED_CONTRACTS = ["shelf-agent-js/1"]; // = src/agent-contract.ts
@@ -78,8 +79,27 @@ export function githubSource(repo = process.env.AGENT_REPO ?? "ToonRz/retail-she
   };
 }
 
-export const defaultSource = () =>
-  process.env.AGENT_RELEASES_DIR ? localSource(process.env.AGENT_RELEASES_DIR) : githubSource();
+const SIBLING_RELEASES_DIR = join("..", "retail-shelf-agent", "release");
+
+export function defaultSource() {
+  if (process.env.AGENT_RELEASES_DIR) return localSource(process.env.AGENT_RELEASES_DIR);
+  if (existsSync(SIBLING_RELEASES_DIR)) {
+    const local = localSource(SIBLING_RELEASES_DIR);
+    const gh = githubSource();
+    return {
+      name: SIBLING_RELEASES_DIR,
+      async versions() {
+        const v = await local.versions();
+        return v.length > 0 ? v : gh.versions();
+      },
+      async download(version, dest) {
+        if (existsSync(join(SIBLING_RELEASES_DIR, version))) return local.download(version, dest);
+        return gh.download(version, dest);
+      },
+    };
+  }
+  return githubSource();
+}
 
 // ---------------------------------------------------------------- verify + fetch
 
@@ -199,7 +219,7 @@ export async function lag({ versionFile = "agent.version", source = defaultSourc
 
 // ---------------------------------------------------------------- CLI
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: { version: { type: "string" }, "allow-minor": { type: "boolean", default: false } },
@@ -207,13 +227,24 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const cmd = positionals[0];
   try {
     if (cmd === "fetch") {
-      for (const file of ["agent.version", "agent-shelf.version"]) {
-        const pin = readPin(file);
-        if (pin === "mock") console.log(`${file} is mock: nothing to fetch`);
-        else {
-          const m = await fetchAgentRelease({ version: pin });
-          console.log(`public/agent/${pin}/ ok: ${Object.keys(m.files).length} files, contract ${m.contract}, model ${m.model.name} (${m.model.classes} classes)`);
+      const pin = readPin("agent.version");
+      if (pin === "mock") console.log("agent.version is mock: nothing to fetch");
+      else {
+        const localDir = process.env.AGENT_RELEASES_DIR || SIBLING_RELEASES_DIR;
+        const stagedDir = join("public/agent", pin);
+        let m;
+        let from;
+        if (existsSync(join(localDir, pin))) {
+          m = await fetchAgentRelease({ version: pin, source: localSource(localDir) });
+          from = localDir;
+        } else if (existsSync(stagedDir)) {
+          m = verifyRelease(stagedDir, pin);
+          from = stagedDir;
+        } else {
+          m = await fetchAgentRelease({ version: pin });
+          from = defaultSource().name;
         }
+        console.log(`public/agent/${pin}/ ok (from ${from}): ${Object.keys(m.files).length} files, contract ${m.contract}, model ${m.model.name} (${m.model.classes} classes)`);
       }
     } else if (cmd === "bump") {
       await bumpAgent({ requested: values.version || undefined, allowMinor: values["allow-minor"] || process.env.ALLOW_MINOR === "1" });
