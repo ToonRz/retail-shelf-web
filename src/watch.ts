@@ -3,7 +3,7 @@
 import type { Agent, Backend } from "./agent-contract";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
-import { dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toGray, type Track } from "./ui/watch-logic";
+import { boxesToSlots, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toGray, type Track } from "./ui/watch-logic";
 
 const INTERVAL_MS = 1000;
 const CLEAR_MS = 3000;
@@ -15,7 +15,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 const ui = {
   stage: $("watchStage"), video: $<HTMLVideoElement>("watchVideo"), overlay: $<HTMLCanvasElement>("watchOverlay"), empty: $("watchEmpty"),
   camBtn: $<HTMLButtonElement>("watchCamBtn"), fileBtn: $<HTMLButtonElement>("watchFileBtn"), file: $<HTMLInputElement>("watchFile"),
-  startBtn: $<HTMLButtonElement>("watchStartBtn"), clearBtn: $<HTMLButtonElement>("watchClearBtn"),
+  autoBtn: $<HTMLButtonElement>("watchAutoBtn"), startBtn: $<HTMLButtonElement>("watchStartBtn"), clearBtn: $<HTMLButtonElement>("watchClearBtn"),
   hold: $<HTMLInputElement>("watchHold"), holdVal: $("watchHoldVal"), conf: $<HTMLInputElement>("watchConf"), confVal: $("watchConfVal"),
   banner: $("watchBanner"), outCount: $("watchOutCount"), latency: $("watchLatency"), slots: $("watchSlots"), log: $("watchLog"),
   notifyBtn: $<HTMLButtonElement>("watchNotifyBtn"), sound: $<HTMLInputElement>("watchSound"), status: $("watchStatus"),
@@ -95,6 +95,7 @@ function renderSlots() {
 }
 
 function updateControls() {
+  ui.autoBtn.disabled = running || !agent || !hasFrame();
   ui.startBtn.disabled = !agent || !hasFrame() || slots.length === 0;
   ui.startBtn.textContent = running ? "หยุดเฝ้า" : "เริ่มเฝ้า";
   ui.clearBtn.disabled = running || slots.length === 0;
@@ -214,6 +215,7 @@ function start() {
   renderSlots();
   updateControls();
   setStatus("กำลังเฝ้าชั้นวาง · เปิดแท็บนี้ค้างไว้");
+  if (ui.video.ended) ui.video.currentTime = 0;
   if (ui.video.paused) void ui.video.play();
   void loop();
 }
@@ -238,14 +240,45 @@ function closeSource() {
   ui.video.srcObject = null;
 }
 
+async function autoDetectSlots() {
+  if (!agent || !hasFrame() || running) return;
+  ui.autoBtn.disabled = true;
+  setStatus("กำลังค้นหาช่องสินค้าจากภาพอัตโนมัติ…");
+  try {
+    const frame = await createImageBitmap(ui.video);
+    try {
+      const r = await agent.detect(frame, { conf: Number(ui.conf.value) });
+      const found = boxesToSlots(r.boxes, r.width, r.height);
+      if (found.length > 0) {
+        slots = found;
+        tracks = new Map();
+        saveSlots();
+      }
+      renderSlots();
+      drawOverlay();
+      updateControls();
+      setStatus(found.length
+        ? `เจอสินค้า ${found.length} ช่องอัตโนมัติ · กด "เริ่มเฝ้า" ได้เลย (หรือลากกรอบเพิ่ม/ลบช่องได้)`
+        : "ไม่เจอสินค้าอัตโนมัติในเฟรมนี้ · ลองลากกรอบรอบสินค้าเอง หรือกด \"หาช่องอัตโนมัติ\" อีกครั้ง");
+    } finally {
+      frame.close();
+    }
+  } catch (e) {
+    updateControls();
+    setStatus(`หาช่องอัตโนมัติไม่สำเร็จ: ${errorMessage(e)}`, true);
+  }
+}
+
+ui.autoBtn.addEventListener("click", () => void autoDetectSlots());
+
 async function showSource() {
-  await new Promise<void>((res) => (ui.video.readyState >= 1 ? res() : ui.video.addEventListener("loadedmetadata", () => res(), { once: true })));
+  await new Promise<void>((res) => (ui.video.readyState >= 2 ? res() : ui.video.addEventListener("loadeddata", () => res(), { once: true })));
   await ui.video.play();
   ui.video.hidden = ui.overlay.hidden = false;
   ui.empty.hidden = true;
   drawOverlay();
   updateControls();
-  setStatus("ลากกรอบรอบสินค้าแต่ละชนิด แล้วกดเริ่มเฝ้า");
+  await autoDetectSlots();
 }
 
 ui.camBtn.addEventListener("click", async () => {

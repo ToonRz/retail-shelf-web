@@ -69,6 +69,40 @@ export function dragToRect(x0: number, y0: number, x1: number, y1: number, minSi
   return w < minSize || h < minSize ? null : [Math.min(x0, x1), Math.min(y0, y1), w, h];
 }
 
+/**
+ * Turn detected product boxes on the full frame into shelf slots (padded slightly so each slot crop
+ * includes the product edges, sorted top-to-bottom then left-to-right).
+ */
+export function boxesToSlots(
+  boxes: Box[],
+  frameW: number,
+  frameH: number,
+  pad = 0.08,
+  minSize = 0.03,
+  makeId: () => string = () => crypto.randomUUID(),
+): Slot[] {
+  if (!(frameW > 0 && frameH > 0)) return [];
+  const rects: Rect[] = [];
+  for (const { xyxy: [x1, y1, x2, y2] } of boxes) {
+    const bw = x2 - x1, bh = y2 - y1;
+    const px = bw * pad, py = bh * pad;
+    const r = dragToRect(
+      Math.max(0, (x1 - px) / frameW),
+      Math.max(0, (y1 - py) / frameH),
+      Math.min(1, (x2 + px) / frameW),
+      Math.min(1, (y2 + py) / frameH),
+      minSize,
+    );
+    if (r) rects.push(r);
+  }
+  rects.sort((a, b) => {
+    const cyA = a[1] + a[3] / 2, cyB = b[1] + b[3] / 2;
+    const sameRow = Math.abs(cyA - cyB) < Math.min(a[3], b[3]) * 0.5;
+    return sameRow ? a[0] - b[0] : cyA - cyB;
+  });
+  return rects.map((rect, i) => ({ id: makeId(), name: `ช่อง ${i + 1}`, rect }));
+}
+
 /** Slots saved in localStorage; anything malformed is dropped instead of breaking the page. */
 export function parseSlots(json: string | null): Slot[] {
   try {
