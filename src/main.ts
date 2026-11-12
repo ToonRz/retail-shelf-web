@@ -72,6 +72,7 @@ async function initAgent(backend: Backend) {
 
 async function show(bitmap: ImageBitmap) {
   if (stream) closeCamera();
+  await live.stop();
   image?.close();
   image = bitmap;
   await run();
