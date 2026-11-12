@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Box } from "../src/agent-contract";
-import { dragToRect, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toGray, type Track } from "../src/ui/watch-logic";
+import { boxesToSlots, dragToRect, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toGray, type Track } from "../src/ui/watch-logic";
 
 const cfg = { holdMs: 10_000, clearMs: 3_000 };
 const box = (x1: number, y1: number, x2: number, y2: number): Box => ({ cls: "product", classId: 0, conf: 0.9, xyxy: [x1, y1, x2, y2] });
@@ -78,5 +78,41 @@ describe("drawing", () => {
     expect(parseSlots(JSON.stringify([ok, { id: "b", name: "B", rect: [0, 2, 1, 1] }, null]))).toEqual([ok]);
     expect(parseSlots("not json")).toEqual([]);
     expect(parseSlots(null)).toEqual([]);
+  });
+  it("creates padded slots from detected boxes, ordered top-to-bottom then left-to-right", () => {
+    let n = 0;
+    const slots = boxesToSlots(
+      [
+        box(600, 100, 800, 300), // top-right
+        box(100, 110, 300, 310), // top-left (same row)
+        box(100, 500, 300, 700), // bottom-left
+        box(10, 10, 15, 15),     // too small -> ignored
+      ],
+      1000,
+      1000,
+      0.05,
+      0.03,
+      () => `s${++n}`,
+    );
+    expect(slots.map((s) => [s.id, s.name, Math.round(s.rect[0] * 100), Math.round(s.rect[1] * 100)])).toEqual([
+      ["s1", "ช่อง 1", 9, 10],
+      ["s2", "ช่อง 2", 59, 9],
+      ["s3", "ช่อง 3", 9, 49],
+    ]);
+  });
+  it("uses the 110-class product name when recognized and falls back to 'ช่อง N' for generic 'product'", () => {
+    let n = 0;
+    const slots = boxesToSlots(
+      [
+        { cls: "lays-salt", classId: 46, conf: 0.92, xyxy: [100, 100, 300, 300] },
+        { cls: "product", classId: 110, conf: 0.80, xyxy: [500, 100, 700, 300] },
+      ],
+      1000,
+      1000,
+      0.05,
+      0.03,
+      () => `s${++n}`,
+    );
+    expect(slots.map((s) => s.name)).toEqual(["lays salt", "ช่อง 2"]);
   });
 });

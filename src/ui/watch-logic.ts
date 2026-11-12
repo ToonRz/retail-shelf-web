@@ -1,5 +1,6 @@
 // Pure logic of the shelf watch page (src/watch.ts), unit-tested in test/watch.test.ts.
 import type { Box } from "../agent-contract";
+import { prettyName } from "./logic";
 
 export type Rect = [number, number, number, number]; // x, y, w, h as fractions of the frame
 export interface Slot { id: string; name: string; rect: Rect }
@@ -67,6 +68,44 @@ export function stageToFrame(px: number, py: number, stageW: number, stageH: num
 export function dragToRect(x0: number, y0: number, x1: number, y1: number, minSize = 0.03): Rect | null {
   const w = Math.abs(x1 - x0), h = Math.abs(y1 - y0);
   return w < minSize || h < minSize ? null : [Math.min(x0, x1), Math.min(y0, y1), w, h];
+}
+
+/**
+ * Turn detected product boxes on the full frame into shelf slots (padded slightly so each slot crop
+ * includes the product edges, sorted top-to-bottom then left-to-right).
+ */
+export function boxesToSlots(
+  boxes: Box[],
+  frameW: number,
+  frameH: number,
+  pad = 0.08,
+  minSize = 0.03,
+  makeId: () => string = () => crypto.randomUUID(),
+): Slot[] {
+  if (!(frameW > 0 && frameH > 0)) return [];
+  const items: Array<{ rect: Rect; cls: string }> = [];
+  for (const { cls, xyxy: [x1, y1, x2, y2] } of boxes) {
+    const bw = x2 - x1, bh = y2 - y1;
+    const px = bw * pad, py = bh * pad;
+    const r = dragToRect(
+      Math.max(0, (x1 - px) / frameW),
+      Math.max(0, (y1 - py) / frameH),
+      Math.min(1, (x2 + px) / frameW),
+      Math.min(1, (y2 + py) / frameH),
+      minSize,
+    );
+    if (r) items.push({ rect: r, cls });
+  }
+  items.sort((a, b) => {
+    const cyA = a.rect[1] + a.rect[3] / 2, cyB = b.rect[1] + b.rect[3] / 2;
+    const sameRow = Math.abs(cyA - cyB) < Math.min(a.rect[3], b.rect[3]) * 0.5;
+    return sameRow ? a.rect[0] - b.rect[0] : cyA - cyB;
+  });
+  return items.map(({ rect, cls }, i) => ({
+    id: makeId(),
+    name: cls && cls !== "product" ? prettyName(cls) : `ช่อง ${i + 1}`,
+    rect,
+  }));
 }
 
 /** Slots saved in localStorage; anything malformed is dropped instead of breaking the page. */

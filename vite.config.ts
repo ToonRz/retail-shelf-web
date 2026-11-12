@@ -14,6 +14,6 @@ export default defineConfig({
   base: process.env.BASE_PATH ?? "/retail-shelf-web/",
   define: {
     __AGENT_VERSION__: JSON.stringify(readAgentVersion()),
-    __SHELF_AGENT_VERSION__: JSON.stringify(readAgentVersion("agent-shelf.version")),
+    __SHELF_AGENT_VERSION__: JSON.stringify(readAgentVersion()),
   },
 });
