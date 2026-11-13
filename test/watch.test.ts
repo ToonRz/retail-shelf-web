@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Box } from "../src/agent-contract";
-import { autoSlots, cropLabel, cropRect, dragToRect, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME } from "../src/ui/watch-logic";
+import { autoSlots, cropLabel, cropRect, dragToRect, endMessage, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME } from "../src/ui/watch-logic";
 
 const cfg = { holdMs: 10_000, clearMs: 3_000 };
 const box = (x1: number, y1: number, x2: number, y2: number): Box => ({ cls: "product", classId: 0, conf: 0.9, xyxy: [x1, y1, x2, y2] });
@@ -140,5 +140,16 @@ describe("auto slots", () => {
   it("pads a crop around a box and keeps it inside the frame", () => {
     expect(cropRect([10, 10, 30, 50], 100, 100, 0.1)).toEqual([8, 6, 24, 48]);
     expect(cropRect([0, 0, 100, 100], 100, 100)).toEqual([0, 0, 100, 100]);
+  });
+});
+
+describe("endMessage", () => {
+  const slots = [{ id: "a", name: "lays", rect: [0, 0, 0.5, 0.5] as [number, number, number, number] }, { id: "b", name: "toro", rect: [0.5, 0, 0.5, 0.5] as [number, number, number, number] }];
+  it("names slots that looked empty but not for the hold time yet", () => {
+    const tracks = new Map<string, Track>([["a", { ...newTrack(), status: "stocked" }], ["b", { ...newTrack(), status: "checking", emptySince: 0 }]]);
+    expect(endMessage(slots, tracks, 15)).toBe("วิดีโอจบแล้ว · toro ว่างยังไม่ถึง 15 วินาทีจึงยังไม่เตือน");
+  });
+  it("is plain when nothing is pending", () => {
+    expect(endMessage(slots, new Map([["b", { ...newTrack(), status: "out" }]]), 15)).toBe("วิดีโอจบแล้ว");
   });
 });

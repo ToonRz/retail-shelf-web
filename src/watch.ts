@@ -4,7 +4,7 @@
 import type { Agent, Backend } from "./agent-contract";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
-import { autoSlots, cropLabel, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
+import { autoSlots, cropLabel, endMessage, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
 
 const INTERVAL_MS = 1000;
 const CLEAR_MS = 3000;
@@ -148,8 +148,13 @@ async function findSlots() {
   finding = true;
   updateControls();
   renderSlots();
-  const frame = await createImageBitmap(ui.video);
+  // A video file is held on the frame the slots come from: it would otherwise play on (stock being taken
+  // away, or the end of the file) while slots are found and checked, before watching has even started.
+  const resume = !stream && !ui.video.paused;
+  if (!stream) ui.video.pause();
+  let frame: ImageBitmap | null = null;
   try {
+    frame = await createImageBitmap(ui.video);
     setStatus("กำลังหาสินค้าในภาพ…");
     const conf = Number(ui.conf.value);
     const classes = agent.manifest.model.classes;
@@ -158,7 +163,7 @@ async function findSlots() {
     const unnamed = items.filter((i) => i.name === null).slice(0, MAX_NAME_CROPS);
     for (const [k, it] of unnamed.entries()) {
       setStatus(`กำลังระบุชื่อสินค้า ${k + 1} / ${unnamed.length}…`);
-      const crop = await createImageBitmap(frame, ...cropRect(it.xyxy, r.width, r.height));
+      const crop = await createImageBitmap(frame!, ...cropRect(it.xyxy, r.width, r.height));
       try {
         const c = await agent.detect(crop, { conf: Math.max(conf, NAME_CONF) });
         it.name = cropLabel(c.boxes, classes, c.width, c.height);
@@ -172,7 +177,7 @@ async function findSlots() {
     const candidates = autoSlots(items, r.width, r.height);
     for (const [k, f] of candidates.entries()) {
       setStatus(`กำลังตรวจช่อง ${k + 1} / ${candidates.length}…`);
-      const crop = await cropSlot(frame, f.rect);
+      const crop = await cropSlot(frame!, f.rect);
       try {
         const c = await agent.detect(crop, { conf, shelfOnly: true });
         if (slotHasProduct(c.boxes, c.width, c.height)) found.push(f);
@@ -180,17 +185,22 @@ async function findSlots() {
         crop.close();
       }
     }
-    if (!found.length) { setStatus("ไม่เจอสินค้าในภาพ ลองตอนชั้นเต็ม ลดความมั่นใจขั้นต่ำ หรือลากกรอบเอง", true); return; }
+    if (!found.length) {
+      if (resume) void ui.video.play();
+      setStatus("ไม่เจอสินค้าในภาพ ลองตอนชั้นเต็ม ลดความมั่นใจขั้นต่ำ หรือลากกรอบเอง", true);
+      return;
+    }
     slots = found.map((f) => ({ id: crypto.randomUUID(), ...f }));
     tracks = new Map();
     saveSlots();
     const named = items.filter((i) => i.name !== null).length;
     const dropped = candidates.length - found.length;
-    setStatus(`เจอ ${found.length} ช่อง จากสินค้า ${items.length} ชิ้น (รู้ชื่อ ${named} ชิ้น)${dropped ? ` · ตัด ${dropped} ช่องที่ตอนนี้ก็ดูว่างอยู่แล้ว` : ""} · ตรวจกรอบ แก้ชื่อ ลบ หรือลากเพิ่มได้ แล้วกดเริ่มเฝ้า`);
+    setStatus(`เจอ ${found.length} ช่อง จากสินค้า ${items.length} ชิ้น (รู้ชื่อ ${named} ชิ้น)${dropped ? ` · ตัด ${dropped} ช่องที่ตอนนี้ก็ดูว่างอยู่แล้ว` : ""} · ตรวจกรอบ แก้ชื่อ ลบ หรือลากเพิ่มได้ แล้วกดเริ่มเฝ้า${stream ? "" : " (วิดีโอหยุดรอที่ภาพนี้)"}`);
   } catch (e) {
+    if (resume) void ui.video.play();
     setStatus(`หาช่องไม่สำเร็จ: ${errorMessage(e)}`, true);
   } finally {
-    frame.close();
+    frame?.close();
     finding = false;
     renderSlots();
     drawOverlay();
@@ -227,12 +237,21 @@ function logEvent(slot: Slot, event: "out" | "restocked") {
   }
 }
 
-ui.notifyBtn.addEventListener("click", async () => {
+function syncNotifyBtn() {
+  if (!("Notification" in window)) return;
+  const p = Notification.permission;
+  ui.notifyBtn.textContent = p === "granted" ? "เปิดแจ้งเตือนแล้ว" : p === "denied" ? "browser บล็อกการแจ้งเตือนไว้" : "เปิดแจ้งเตือนของ browser";
+  ui.notifyBtn.disabled = p !== "default";
+}
+
+/** Must run inside a click: browsers only show the permission prompt for a user gesture. */
+async function askNotify() {
   if (!("Notification" in window)) { setStatus("browser นี้ไม่รองรับการแจ้งเตือน", true); return; }
-  const p = await Notification.requestPermission();
-  ui.notifyBtn.textContent = p === "granted" ? "เปิดแจ้งเตือนแล้ว" : "ยังไม่ได้รับอนุญาต";
-  ui.notifyBtn.disabled = p === "granted";
-});
+  if (Notification.permission === "default") await Notification.requestPermission();
+  syncNotifyBtn();
+}
+
+ui.notifyBtn.addEventListener("click", () => void askNotify());
 
 // ---------------------------------------------------------------- watch loop
 
@@ -262,7 +281,7 @@ async function checkSlot(s: Slot, conf: number, cfg: { holdMs: number; clearMs: 
 
 async function loop() {
   while (running) {
-    if (ui.video.ended) { stop("วิดีโอจบแล้ว"); break; }
+    if (ui.video.ended) { stop(endMessage(slots, tracks, Number(ui.hold.value))); break; }
     const t0 = performance.now();
     const cfg = { holdMs: Number(ui.hold.value) * 1000, clearMs: CLEAR_MS };
     const conf = Number(ui.conf.value);
@@ -286,6 +305,7 @@ function start() {
   ui.log.replaceChildren(Object.assign(document.createElement("li"), { className: "muted placeholder", textContent: "ยังไม่มีการแจ้งเตือน" }));
   running = true;
   audio?.resume();
+  if ("Notification" in window && Notification.permission === "default") void askNotify(); // the start click is the gesture
   renderSlots();
   updateControls();
   setStatus("กำลังเฝ้าชั้นวาง · เปิดแท็บนี้ค้างไว้");
@@ -316,6 +336,8 @@ function closeSource() {
 async function showSource() {
   await new Promise<void>((res) => (ui.video.readyState >= 1 ? res() : ui.video.addEventListener("loadedmetadata", () => res(), { once: true })));
   await ui.video.play();
+  // play() resolves before the first frame is decoded; until then createImageBitmap(video) throws "not usable".
+  if ("requestVideoFrameCallback" in ui.video) await new Promise<void>((res) => ui.video.requestVideoFrameCallback(() => res()));
   ui.video.hidden = ui.overlay.hidden = false;
   ui.empty.hidden = true;
   drawOverlay();
@@ -364,6 +386,7 @@ export async function openWatch() {
   opened = true;
   try { slots = parseSlots(localStorage.getItem(SLOTS_KEY)); } catch { /* private mode */ }
   syncLabels();
+  syncNotifyBtn();
   renderSlots();
   ui.pill.textContent = `agent ${SHELF_AGENT_VERSION}`;
   ui.progress.hidden = SHELF_AGENT_VERSION === "mock";

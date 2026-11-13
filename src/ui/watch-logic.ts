@@ -180,4 +180,10 @@ export function autoSlots(items: FoundItem[], width: number, height: number, max
   });
 }
 
+/** Status when a video file ends: slots that looked empty for less than the hold time never alerted, so name them. */
+export function endMessage(slots: Slot[], tracks: Map<string, Track>, holdSec: number): string {
+  const pending = slots.filter((s) => tracks.get(s.id)?.status === "checking").map((s) => s.name);
+  return pending.length ? `วิดีโอจบแล้ว · ${pending.join(", ")} ว่างยังไม่ถึง ${holdSec} วินาทีจึงยังไม่เตือน` : "วิดีโอจบแล้ว";
+}
+
 export const STATUS_TH: Record<SlotStatus, string> = { waiting: "รอตรวจ", stocked: "มีของ", checking: "กำลังยืนยัน", out: "ของหมด" };
