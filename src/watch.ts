@@ -1,5 +1,5 @@
 // Shelf watch page: draw one box per product slot, then get an alert when a slot stays empty.
-// Each slot is cropped from the camera or a video file and checked with the 1-class shelf model.
+// Each slot is cropped from the camera or a video file and checked for any product box (any class).
 import type { Agent, Backend } from "./agent-contract";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
