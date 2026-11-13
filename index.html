@@ -118,6 +118,8 @@
     .alert-banner { padding: 10px 16px; background: var(--bad); color: #fff; font-weight: 700; overflow-wrap: anywhere; }
     .watch-sliders { display: flex; flex: 1 1 100%; flex-wrap: wrap; gap: 8px 16px; }
     .watch-sliders .slider { flex: 1 1 220px; margin: 0; }
+    #pageWatch .actions { flex-wrap: wrap; }
+    #pageWatch .actions .btn { flex: 1 1 30%; white-space: nowrap; }
     .slot-name { width: 100%; min-height: 32px; padding: 0 6px; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
     .slot-stocked { color: #2fa45a; font-weight: 600; }
     .slot-checking { color: #b98500; font-weight: 600; }
@@ -148,7 +150,7 @@
     @media (min-width: 720px) {
       .doc section { grid-template-columns: 200px minmax(0, 1fr); gap: 24px; }
       .actions { flex: 0 0 auto; }
-      .actions .btn { flex: 0 0 auto; }
+      .actions .btn, #pageWatch .actions .btn { flex: 0 0 auto; }
       .slider { flex: 0 1 280px; margin-left: auto; }
     }
     @media (min-width: 900px) and (min-height: 520px) {
@@ -248,7 +250,7 @@
       <canvas id="watchOverlay" hidden aria-label="ภาพชั้นวางและกรอบแต่ละช่อง"></canvas>
       <div class="empty" id="watchEmpty">
         <p class="empty-title">เฝ้าชั้นวางและแจ้งเตือนเมื่อของหมด</p>
-        <p>เปิดกล้องที่ตั้งนิ่ง ๆ หรือเลือกวิดีโอ แล้วลากกรอบรอบสินค้าแต่ละชนิด</p>
+        <p>เปิดกล้องที่ตั้งนิ่ง ๆ หรือเลือกวิดีโอ แล้วกด "หาช่องอัตโนมัติ" ตอนชั้นเต็ม หรือลากกรอบรอบสินค้าแต่ละชนิดเอง</p>
         <p class="fine">ภาพถูกประมวลผลในเครื่องนี้เท่านั้น ไม่ถูกส่งออกไปไหน</p>
       </div>
     </div>
@@ -258,6 +260,7 @@
         <button class="btn ghost" id="watchCamBtn" type="button" disabled>เปิดกล้อง</button>
         <button class="btn ghost" id="watchFileBtn" type="button" disabled>เลือกวิดีโอ</button>
         <input id="watchFile" type="file" accept="video/*" hidden>
+        <button class="btn ghost" id="watchAutoBtn" type="button" disabled title="ใช้ตอนชั้นเต็ม: หาสินค้าทั้งภาพแล้วรวมสินค้าชนิดเดียวกันที่วางติดกันเป็นช่องเดียว">หาช่องอัตโนมัติ</button>
         <button class="btn" id="watchStartBtn" type="button" disabled>เริ่มเฝ้า</button>
         <button class="btn ghost" id="watchClearBtn" type="button" disabled>ลบทุกช่อง</button>
       </div>
@@ -311,7 +314,9 @@
           แล้ว export เป็น ONNX ให้รันใน browser ด้วย onnxruntime-web (WebGPU หรือ WASM)
           ไม่มี server รูปที่เลือกหรือถ่ายจะถูกประมวลผลในเครื่องนี้เท่านั้น</p>
         <p>หน้า "เฝ้าชั้นวาง" ใช้อีก model หนึ่ง: YOLOv8n คลาสเดียว (<code>product</code>) ที่เทรนบนรูปชั้นวางของ SKU-110K
-          ตรวจแต่ละช่องที่วาดไว้ทุก 1 วินาที ถ้าช่องว่างนานเกินเวลาที่ตั้งจะแจ้งเตือนว่าของหมด
+          ตรวจแต่ละช่องที่วาดไว้ทุก 1 วินาที
+          ปุ่ม "หาช่องอัตโนมัติ" ใช้ทั้งสอง model กับภาพเต็มหนึ่งครั้ง (กล่องที่ model 110 คลาสไม่รู้จักจะถูก crop มาระบุชื่ออีกรอบ)
+          แล้วรวมสินค้าชนิดเดียวกันที่วางติดกันในแถวเดียวกันเป็นหนึ่งช่อง (ไม่เกิน 6 ชิ้นต่อช่อง) จึงควรกดตอนชั้นเต็ม ถ้าช่องว่างนานเกินเวลาที่ตั้งจะแจ้งเตือนว่าของหมด
           ช่วงที่มีคนบังช่อง (ภาพเปลี่ยนมาก) จะหยุดนับเวลา</p>
         <p class="muted" id="aboutAgent"></p>
       </div>
