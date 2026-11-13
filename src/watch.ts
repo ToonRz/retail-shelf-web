@@ -4,7 +4,7 @@
 import type { Agent, Backend } from "./agent-contract";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
-import { autoSlots, cropLabel, endMessage, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
+import { autoSlots, clipRect, cropLabel, endMessage, fitView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
 
 const INTERVAL_MS = 1000;
 const CLEAR_MS = 3000;
@@ -13,6 +13,9 @@ const THUMB = 32;
 const SLOTS_KEY = "watchSlots";
 const NAME_CONF = 0.5;  // a name from a crop below this is more often wrong than right: keep "สินค้าอื่น" instead
 const MAX_NAME_CROPS = 60; // unnamed boxes looked at one by one (~0.7 s each on WASM)
+const GRAY_W = 128, GRAY_H = 96; // the small copy of each frame the view is matched on
+const MIN_SHARP = 0.03;   // refineView best stands out from its neighbours less than this: no clear match (lost)
+const MIN_VISIBLE = 0.4;   // a slot with less of it inside the frame (zoomed in) is not judged: its timers pause
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const ui = {
@@ -21,7 +24,7 @@ const ui = {
   startBtn: $<HTMLButtonElement>("watchStartBtn"), autoBtn: $<HTMLButtonElement>("watchAutoBtn"), clearBtn: $<HTMLButtonElement>("watchClearBtn"),
   hold: $<HTMLInputElement>("watchHold"), holdVal: $("watchHoldVal"), conf: $<HTMLInputElement>("watchConf"), confVal: $("watchConfVal"),
   banner: $("watchBanner"), outCount: $("watchOutCount"), latency: $("watchLatency"), slots: $("watchSlots"), log: $("watchLog"),
-  notifyBtn: $<HTMLButtonElement>("watchNotifyBtn"), sound: $<HTMLInputElement>("watchSound"), status: $("watchStatus"),
+  notifyBtn: $<HTMLButtonElement>("watchNotifyBtn"), sound: $<HTMLInputElement>("watchSound"), follow: $<HTMLInputElement>("watchFollow"), status: $("watchStatus"),
   progress: $<HTMLProgressElement>("watchProgress"), pill: $("watchPill"), backend: $<HTMLSelectElement>("backend"),
 };
 
@@ -36,6 +39,17 @@ let running = false;
 let finding = false; // auto slots in progress
 let drag: { x0: number; y0: number; x1: number; y1: number } | null = null;
 let audio: AudioContext | null = null;
+// Follow the view: slots are kept in the coordinates of a reference frame (the first watched frame after the slots
+// changed) and moved by `view` (zoom + pan) found each round from the products the shelf model sees on the whole frame.
+// Finding slots again every round would not work: an empty slot has no product to find, so it would just vanish.
+let refBoxes: NBox[] | null = null;
+let refGray: Gray | null = null;
+let view: View = IDENTITY;
+let lost = 0; // rounds in a row the view could not be found
+const resetView = () => { refBoxes = refGray = null; view = IDENTITY; lost = 0; };
+const grayCtx = Object.assign(document.createElement("canvas"), { width: GRAY_W, height: GRAY_H }).getContext("2d", { willReadFrequently: true })!;
+const slotRect = (s: Slot) => mapRect(s.rect, view);
+const isAway = (s: Slot) => visibleFraction(slotRect(s)) < MIN_VISIBLE; // zoomed / panned out of the frame
 const thumbCtx = Object.assign(document.createElement("canvas"), { width: THUMB, height: THUMB }).getContext("2d", { willReadFrequently: true })!;
 
 const setStatus = (text: string, bad = false) => { ui.status.textContent = text; ui.status.classList.toggle("bad", bad); };
@@ -68,10 +82,15 @@ function drawOverlay() {
   ctx.textBaseline = "top";
   const COLOR = { waiting: "#9aa1ad", stocked: "#2fa45a", checking: "#e0a100", out: "#e03b3b" };
   for (const s of slots) {
-    const [x, y, w, h] = s.rect, status = tracks.get(s.id)?.status ?? "waiting";
-    ctx.strokeStyle = ctx.fillStyle = COLOR[status];
+    const rect = slotRect(s), status = tracks.get(s.id)?.status ?? "waiting";
+    const away = isAway(s);
+    const [x, y, w, h] = away ? clipRect(rect) : rect;
+    if (w <= 0 || h <= 0) continue;
+    ctx.strokeStyle = ctx.fillStyle = COLOR[away ? "waiting" : status];
+    if (away) ctx.setLineDash([lw * 3, lw * 2]);
     ctx.strokeRect(x * W, y * H, w * W, h * H);
-    const label = status === "waiting" ? s.name : `${s.name} · ${STATUS_TH[status]}`;
+    ctx.setLineDash([]);
+    const label = away ? `${s.name} · นอกภาพ` : status === "waiting" ? s.name : `${s.name} · ${STATUS_TH[status]}`;
     ctx.fillRect(x * W, y * H, ctx.measureText(label).width + 12, fs + 8);
     ctx.fillStyle = "#fff";
     ctx.fillText(label, x * W + 6, y * H + 4);
@@ -90,8 +109,8 @@ function renderSlots() {
     input.setAttribute("aria-label", "ชื่อสินค้าในช่องนี้");
     input.addEventListener("change", () => { s.name = input.value.trim() || s.name; input.value = s.name; saveSlots(); drawOverlay(); });
     nameTd.append(input);
-    const status = tracks.get(s.id)?.status ?? "waiting";
-    const st = Object.assign(document.createElement("td"), { textContent: STATUS_TH[status], className: `slot-${status}` });
+    const status = tracks.get(s.id)?.status ?? "waiting", away = isAway(s);
+    const st = Object.assign(document.createElement("td"), { textContent: away ? "นอกภาพ" : STATUS_TH[status], className: `slot-${away ? "waiting" : status}` });
     const del = document.createElement("td");
     del.className = "num";
     const btn = Object.assign(document.createElement("button"), { type: "button", textContent: "ลบ", className: "link" });
@@ -135,7 +154,7 @@ ui.overlay.addEventListener("pointerup", () => {
   const r: Rect | null = dragToRect(drag.x0, drag.y0, drag.x1, drag.y1);
   drag = null;
   if (r) {
-    slots.push({ id: crypto.randomUUID(), name: `ช่อง ${slots.length + 1}`, rect: r });
+    slots.push({ id: crypto.randomUUID(), name: `ช่อง ${slots.length + 1}`, rect: unmapRect(r, view) }); // drawn on the view as it is now
     saveSlots();
     renderSlots();
     updateControls();
@@ -143,7 +162,7 @@ ui.overlay.addEventListener("pointerup", () => {
   drawOverlay();
 });
 
-ui.clearBtn.addEventListener("click", () => { slots = []; tracks = new Map(); saveSlots(); renderSlots(); drawOverlay(); updateControls(); });
+ui.clearBtn.addEventListener("click", () => { slots = []; tracks = new Map(); resetView(); saveSlots(); renderSlots(); drawOverlay(); updateControls(); });
 
 // ---------------------------------------------------------------- auto slots
 
@@ -209,6 +228,7 @@ async function findSlots(ask = true) {
     }
     slots = found.map((f) => ({ id: crypto.randomUUID(), ...f }));
     tracks = new Map();
+    resetView();
     saveSlots();
     const named = items.filter((i) => i.name !== null).length;
     const dropped = candidates.length - found.length;
@@ -279,8 +299,14 @@ function cropSlot(src: HTMLVideoElement | HTMLImageElement | ImageBitmap, [x, y,
   return createImageBitmap(src, Math.round(x * W), Math.round(y * H), Math.max(1, Math.round(w * W)), Math.max(1, Math.round(h * H)));
 }
 
-async function checkSlot(s: Slot, conf: number, cfg: { holdMs: number; clearMs: number }): Promise<number> {
-  const crop = await cropSlot(media(), s.rect);
+async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdMs: number; clearMs: number }): Promise<number> {
+  const rect = slotRect(s);
+  if (isAway(s)) { // zoomed or panned away: says nothing about the stock, like a blocked slot
+    tracks.set(s.id, stepTrack(tracks.get(s.id) ?? newTrack(), false, true, now(), cfg).track);
+    thumbs.delete(s.id);
+    return 0;
+  }
+  const crop = await cropSlot(frame, clipRect(rect));
   try {
     thumbCtx.drawImage(crop, 0, 0, THUMB, THUMB);
     const gray = toGray(thumbCtx.getImageData(0, 0, THUMB, THUMB).data);
@@ -297,19 +323,50 @@ async function checkSlot(s: Slot, conf: number, cfg: { holdMs: number; clearMs: 
   }
 }
 
+/**
+ * Where the reference frame is in this frame now (zoom + pan): a rough guess from the product boxes the shelf model
+ * sees on the whole frame (fitView), pinned down by matching a small grayscale copy of both frames (refineView).
+ */
+async function followView(frame: ImageBitmap, conf: number): Promise<number> {
+  const r = await agent!.detect(frame, { conf, shelfOnly: true });
+  const boxes = normBoxes(r.boxes, r.width, r.height);
+  grayCtx.drawImage(frame, 0, 0, GRAY_W, GRAY_H);
+  const gray: Gray = { w: GRAY_W, h: GRAY_H, px: toGray(grayCtx.getImageData(0, 0, GRAY_W, GRAY_H).data) };
+  if (!refBoxes || !refGray) {
+    refBoxes = boxes; refGray = gray; view = IDENTITY; lost = 0;
+  } else {
+    const f = fitView(refBoxes, boxes, view);
+    await breathe();
+    const m = refineView(refGray, gray, f ? [f.view, view] : [view]);
+    if (m.sharp >= MIN_SHARP) { view = m.view; lost = 0; } else lost++; // keep the last view
+  }
+  setStatus(watchStatus());
+  return r.latency_ms;
+}
+
+function watchStatus(): string {
+  const zoomed = Math.abs(view.s - 1) > 0.03 || Math.abs(view.tx) > 0.02 || Math.abs(view.ty) > 0.02;
+  return `กำลังเฝ้าชั้นวาง · เปิดแท็บนี้ค้างไว้${lost >= 2 ? " · หาตำแหน่งชั้นในภาพไม่เจอ ใช้ตำแหน่งล่าสุด" : zoomed ? ` · ภาพขยับ (ซูม ×${view.s.toFixed(2)}) กรอบตามไปแล้ว` : ""}`;
+}
+
 async function loop() {
   while (running) {
     if (isVideoFile() && ui.video.ended) { stop(endMessage(slots, tracks, Number(ui.hold.value))); break; }
     const t0 = performance.now();
     const cfg = { holdMs: Number(ui.hold.value) * 1000, clearMs: CLEAR_MS };
     const conf = Number(ui.conf.value);
+    let frame: ImageBitmap | null = null;
     try {
+      frame = await createImageBitmap(media()); // one still per round: the view and every slot come from the same frame
       let total = 0;
-      for (const s of slots) { total += await checkSlot(s, conf, cfg); await breathe(); }
+      if (ui.follow.checked) { total += await followView(frame, conf); await breathe(); }
+      for (const s of slots) { total += await checkSlot(frame, s, conf, cfg); await breathe(); }
       ui.latency.textContent = total.toFixed(0);
     } catch (e) {
       stop(`ตรวจไม่สำเร็จ: ${errorMessage(e)}`, true);
       break;
+    } finally {
+      frame?.close();
     }
     renderSlots();
     drawOverlay();
@@ -326,7 +383,7 @@ function start() {
   if ("Notification" in window && Notification.permission === "default") void askNotify(); // the start click is the gesture
   renderSlots();
   updateControls();
-  setStatus("กำลังเฝ้าชั้นวาง · เปิดแท็บนี้ค้างไว้");
+  setStatus(watchStatus());
   if (isVideoFile() && ui.video.paused) void ui.video.play();
   void loop();
 }
@@ -351,6 +408,7 @@ function closeSource() {
   ui.video.srcObject = null;
   ui.video.load(); // drop the old frame, so videoWidth is 0 until the new source is ready
   isImage = false;
+  resetView();
   ui.image.removeAttribute("src");
   ui.video.hidden = ui.image.hidden = ui.overlay.hidden = true;
   ui.empty.hidden = false;

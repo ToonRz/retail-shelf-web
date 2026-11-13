@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Box } from "../src/agent-contract";
-import { autoSlots, cropLabel, cropRect, dragToRect, endMessage, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME } from "../src/ui/watch-logic";
+import { autoSlots, cropLabel, clipRect, cropRect, dragToRect, endMessage, fitView, type Gray, IDENTITY, refineView, mapRect, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME } from "../src/ui/watch-logic";
 
 const cfg = { holdMs: 10_000, clearMs: 3_000 };
 const box = (x1: number, y1: number, x2: number, y2: number): Box => ({ cls: "product", classId: 0, conf: 0.9, xyxy: [x1, y1, x2, y2] });
@@ -151,5 +151,98 @@ describe("endMessage", () => {
   });
   it("is plain when nothing is pending", () => {
     expect(endMessage(slots, new Map([["b", { ...newTrack(), status: "out" }]]), 15)).toBe("วิดีโอจบแล้ว");
+  });
+});
+
+describe("follow the view", () => {
+  // a 2-row shelf of 6 products, each a different size so no guess is ambiguous
+  const ref: NBox[] = [[0.05, 0.05, 0.3, 0.45], [0.38, 0.1, 0.62, 0.45], [0.7, 0.05, 0.95, 0.42], [0.08, 0.55, 0.28, 0.95], [0.4, 0.52, 0.65, 0.93], [0.72, 0.58, 0.93, 0.95]];
+  const move = (bs: NBox[], s: number, tx: number, ty: number): NBox[] => bs.map(([a, b, c, d]) => [s * a + tx, s * b + ty, s * c + tx, s * d + ty]);
+  const near = (v: { s: number; tx: number; ty: number }, s: number, tx: number, ty: number) => {
+    expect(v.s).toBeCloseTo(s, 3); expect(v.tx).toBeCloseTo(tx, 3); expect(v.ty).toBeCloseTo(ty, 3);
+  };
+
+  it("maps a rect there and back", () => {
+    const v = { s: 1.5, tx: -0.2, ty: 0.1 };
+    const r = mapRect([0.2, 0.3, 0.1, 0.2], v);
+    expect(r.map((n) => +n.toFixed(6))).toEqual([0.1, 0.55, 0.15, 0.3]);
+    expect(unmapRect(r, v).map((n) => +n.toFixed(6))).toEqual([0.2, 0.3, 0.1, 0.2]);
+  });
+
+  it("measures and clips the part inside the frame", () => {
+    expect(visibleFraction([0.2, 0.2, 0.2, 0.2])).toBeCloseTo(1);
+    expect(visibleFraction([-0.1, 0, 0.2, 0.5])).toBeCloseTo(0.5);
+    expect(visibleFraction([1.1, 0, 0.2, 0.5])).toBe(0);
+    expect(clipRect([-0.1, 0.9, 0.2, 0.2]).map((n) => +n.toFixed(6))).toEqual([0, 0.9, 0.1, 0.1]);
+  });
+
+  it("finds a small move from the last view", () => {
+    near(fitView(ref, move(ref, 1.05, -0.02, 0.01), IDENTITY)!.view, 1.05, -0.02, 0.01);
+  });
+
+  const cut = (bs: NBox[]): NBox[] => bs.map(([a, b, c, d]) => [Math.max(0, a), Math.max(0, b), Math.min(1, c), Math.min(1, d)] as NBox)
+    .filter(([a, b, c, d]) => c > a && d > b);
+
+  it("finds a big zoom in one step, with products cut by the frame edge", () => {
+    const cur = cut(move(ref, 1.25, -0.125, -0.1)); // zoom on the centre: only 1 product is still whole
+    expect(cur.filter(([a, b, c, d]) => a > 0.01 && b > 0.01 && c < 0.99 && d < 0.99).length).toBe(1);
+    near(fitView(ref, cur, IDENTITY)!.view, 1.25, -0.125, -0.1);
+    near(fitView(ref, cut(move(ref, 1.6, -0.3, -0.25)), { s: 1.5, tx: -0.27, ty: -0.22 })!.view, 1.6, -0.3, -0.25);
+  });
+
+  it("ignores products taken away and boxes that were not there before", () => {
+    const cur = [...move(ref, 0.8, 0.1, 0.05).slice(0, 4), [0.9, 0.9, 0.97, 0.98] as NBox];
+    const f = fitView(ref, cur, IDENTITY)!;
+    near(f.view, 0.8, 0.1, 0.05);
+    expect(f.matched).toBe(4);
+  });
+
+  it("keeps to the last view on a row of identical products", () => {
+    const row: NBox[] = [0, 1, 2, 3, 4].map((i) => [0.1 + i * 0.16, 0.3, 0.24 + i * 0.16, 0.6]);
+    const prev = { s: 1, tx: 0.04, ty: 0 };
+    near(fitView(row, row.map(([a, b, c, d]) => [a + 0.05, b, c + 0.05, d] as NBox), prev)!.view, 1, 0.05, 0);
+  });
+
+  it("gives up when nothing agrees", () => {
+    expect(fitView(ref, [], IDENTITY)).toBeNull();
+    expect(fitView(ref, [[0.4, 0.4, 0.42, 0.9]], IDENTITY)).toBeNull();
+  });
+});
+
+describe("refineView", () => {
+  // a shelf as a function of reference coordinates (0..1): a light back wall, two shelf strips and six products
+  // of different shades; outside it the camera sees a dark wall
+  const products: Array<[number, number, number, number, number]> = [[0.05, 0.05, 0.3, 0.45, 60], [0.38, 0.1, 0.62, 0.45, 200], [0.7, 0.05, 0.95, 0.42, 90],
+    [0.08, 0.55, 0.28, 0.95, 160], [0.4, 0.52, 0.65, 0.93, 40], [0.72, 0.58, 0.93, 0.95, 230]];
+  const scene = (u: number, v: number) => {
+    if (u < 0 || u > 1 || v < 0 || v > 1) return 30;
+    const p = products.find(([a, b, c, d]) => u >= a && u <= c && v >= b && v <= d);
+    if (p) return p[4] + 20 * Math.sin(40 * u) * Math.sin(30 * v); // print on the pack
+    return (v > 0.46 && v < 0.5) || v > 0.96 ? 245 : 150 + 10 * Math.sin(60 * u);
+  };
+  const render = (view: { s: number; tx: number; ty: number }, hole?: [number, number, number, number]): Gray => {
+    const w = 128, h = 96, px = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const fx = (x + 0.5) / w, fy = (y + 0.5) / h;
+      const inHole = hole && fx >= hole[0] && fx <= hole[2] && fy >= hole[1] && fy <= hole[3];
+      px[y * w + x] = inHole ? 200 : Math.max(0, Math.min(255, Math.round(scene((fx - view.tx) / view.s, (fy - view.ty) / view.s))));
+    }
+    return { w, h, px };
+  };
+
+  it("pins the zoom and pan from a rough guess, with part of the shelf changed", () => {
+    const truth = { s: 1.3, tx: -0.15, ty: -0.135 };
+    const r = refineView(render(IDENTITY), render(truth, [0.3, 0.6, 0.6, 0.95]) /* one product taken away */, [{ s: 1.17, tx: -0.126, ty: -0.037 }, IDENTITY]);
+    expect(r.view.s).toBeCloseTo(1.3, 1);
+    expect(Math.abs(r.view.s - 1.3)).toBeLessThan(0.02);
+    expect(Math.abs(r.view.tx + 0.15)).toBeLessThan(0.01);
+    expect(Math.abs(r.view.ty + 0.135)).toBeLessThan(0.01);
+    expect(r.score).toBeGreaterThan(0.7);
+    expect(r.sharp).toBeGreaterThan(0.05);
+  });
+
+  it("finds no clear match on a picture of something else", () => {
+    const other: Gray = { w: 128, h: 96, px: Uint8Array.from({ length: 128 * 96 }, (_, i) => (i * 7919) % 251) };
+    expect(refineView(render(IDENTITY), other, [IDENTITY]).sharp).toBeLessThan(0.03);
   });
 });

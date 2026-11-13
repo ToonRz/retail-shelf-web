@@ -187,3 +187,213 @@ export function endMessage(slots: Slot[], tracks: Map<string, Track>, holdSec: n
 }
 
 export const STATUS_TH: Record<SlotStatus, string> = { waiting: "รอตรวจ", stocked: "มีของ", checking: "กำลังยืนยัน", out: "ของหมด" };
+
+// ---------------------------------------------------------------- follow the view (camera zoom / pan)
+
+/**
+ * Where the reference picture (the one the slots were drawn on) is in the current frame, all in fractions of the
+ * frame: a point p of the reference is at s * p + t now. Zoom and pan only: a shelf camera does not roll.
+ */
+export interface View { s: number; tx: number; ty: number }
+export const IDENTITY: View = { s: 1, tx: 0, ty: 0 };
+export type NBox = [number, number, number, number]; // x1, y1, x2, y2 as fractions of the frame
+
+export const mapRect = ([x, y, w, h]: Rect, v: View): Rect => [v.s * x + v.tx, v.s * y + v.ty, v.s * w, v.s * h];
+export const unmapRect = ([x, y, w, h]: Rect, v: View): Rect => [(x - v.tx) / v.s, (y - v.ty) / v.s, w / v.s, h / v.s];
+const mapBox = ([x1, y1, x2, y2]: NBox, v: View): NBox => [v.s * x1 + v.tx, v.s * y1 + v.ty, v.s * x2 + v.tx, v.s * y2 + v.ty];
+
+/** Share of a rect that is inside the frame (0 when it is all outside). */
+export function visibleFraction([x, y, w, h]: Rect): number {
+  const iw = Math.max(0, Math.min(1, x + w) - Math.max(0, x)), ih = Math.max(0, Math.min(1, y + h) - Math.max(0, y));
+  return w > 0 && h > 0 ? (iw * ih) / (w * h) : 0;
+}
+
+/** The part of a rect inside the frame. */
+export function clipRect([x, y, w, h]: Rect): Rect {
+  const l = Math.max(0, x), t = Math.max(0, y);
+  return [l, t, Math.max(0, Math.min(1, x + w) - l), Math.max(0, Math.min(1, y + h) - t)];
+}
+
+export const normBoxes = (boxes: Box[], width: number, height: number): NBox[] =>
+  boxes.map(({ xyxy: [x1, y1, x2, y2] }) => [x1 / width, y1 / height, x2 / width, y2 / height]);
+
+const area = ([x1, y1, x2, y2]: NBox) => Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+function iou(a: NBox, b: NBox): number {
+  const i = area([Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.min(a[2], b[2]), Math.min(a[3], b[3])]);
+  return i > 0 ? i / (area(a) + area(b) - i) : 0;
+}
+function median(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b), m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+const FOLLOW_IOU = 0.4;     // a reference box moved by the view must overlap a box of this frame this much to count
+const FOLLOW_MAX_BOXES = 40; // largest boxes only: keeps the search fast on a dense shelf
+const FOLLOW_ZOOM = [0.33, 3] as const;
+
+const EDGE = 0.01; // a box edge this close to the frame border is where the frame cuts the product, not its edge
+const clip01 = ([x1, y1, x2, y2]: NBox): NBox => [Math.max(0, x1), Math.max(0, y1), Math.min(1, x2), Math.min(1, y2)];
+const whole = (b: NBox) => b[0] > EDGE && b[1] > EDGE && b[2] < 1 - EDGE && b[3] < 1 - EDGE;
+
+/** Reference boxes moved by the view (and cut by the frame, as the detector sees them) paired with a box of this frame. */
+function matches(ref: NBox[], cur: NBox[], v: View): Array<[NBox, NBox]> {
+  const out: Array<[NBox, NBox]> = [];
+  for (const r of ref) {
+    const m = clip01(mapBox(r, v));
+    if (area(m) <= 0) continue;
+    let best: NBox | null = null, bestIou = FOLLOW_IOU;
+    for (const c of cur) { const o = iou(m, c); if (o >= bestIou) { best = c; bestIou = o; } }
+    if (best) out.push([r, best]);
+  }
+  return out;
+}
+
+/**
+ * Zoom + pan from matched pairs: every box edge that is a real product edge (not where the frame cuts the product)
+ * says current = s * reference + t on its axis; least squares over all of them. Falls back to medians of the
+ * whole boxes when the edges cannot fix the zoom.
+ */
+function solve(pairs: Array<[NBox, NBox]>): View {
+  // normal equations for [s, tx, ty]; an x edge is the row [r, 1, 0] = c, a y edge [r, 0, 1] = c. Eliminating tx, ty:
+  // s * (Σr² - (Σxr)²/nx - (Σyr)²/ny) = Σrc - Σxr·Σxc/nx - Σyr·Σyc/ny
+  let rr = 0, rc = 0, xr = 0, xc = 0, nx = 0, yr = 0, yc = 0, ny = 0;
+  const edge = (r: number, c: number, x: boolean) => {
+    rr += r * r; rc += r * c;
+    if (x) { xr += r; xc += c; nx++; } else { yr += r; yc += c; ny++; }
+  };
+  for (const [r, c] of pairs) {
+    if (c[0] > EDGE) edge(r[0], c[0], true);
+    if (c[2] < 1 - EDGE) edge(r[2], c[2], true);
+    if (c[1] > EDGE) edge(r[1], c[1], false);
+    if (c[3] < 1 - EDGE) edge(r[3], c[3], false);
+  }
+  const den = nx && ny ? rr - (xr * xr) / nx - (yr * yr) / ny : 0;
+  if (den > 1e-6) {
+    const s = (rc - (xr * xc) / nx - (yr * yc) / ny) / den;
+    return { s, tx: (xc - s * xr) / nx, ty: (yc - s * yr) / ny };
+  }
+  const s = median(pairs.map(([r, c]) => Math.sqrt(area(c) / area(r))));
+  return {
+    s,
+    tx: median(pairs.map(([r, c]) => (c[0] + c[2]) / 2 - s * (r[0] + r[2]) / 2)),
+    ty: median(pairs.map(([r, c]) => (c[1] + c[3]) / 2 - s * (r[1] + r[3]) / 2)),
+  };
+}
+
+/**
+ * Find the view of this frame from the product boxes of the reference picture and of this frame. Products taken
+ * away (or new ones) just do not match; the rest agree on one zoom + pan. Starts from the last view; only when that
+ * no longer fits (a fast zoom) every reference / current pair is tried as a guess, and on a tie (a row of identical
+ * products) the guess closest to the last view wins; guesses come from products whole in the frame, but products
+ * cut by the frame edge still count as matches. null when fewer than 2 products (1 if there is only 1) agree.
+ */
+export function fitView(ref: NBox[], cur: NBox[], prev: View): { view: View; matched: number } | null {
+  const big = (bs: NBox[]) => [...bs].filter((b) => area(b) > 0).sort((a, b) => area(b) - area(a)).slice(0, FOLLOW_MAX_BOXES);
+  const R = big(ref), C = big(cur);
+  const need = Math.min(2, R.length, C.length);
+  if (need === 0) return null;
+  let best = prev, pairs = matches(R, C, prev);
+  if (pairs.length < Math.max(need, 0.5 * Math.min(R.length, C.length))) {
+    const off = (v: View) => Math.abs(Math.log(v.s / prev.s)) + Math.abs(v.tx - prev.tx) + Math.abs(v.ty - prev.ty);
+    for (const r of R) for (const c of C.filter(whole)) { // a cut box has the wrong size: no guess from it
+      const ar = (r[2] - r[0]) / (r[3] - r[1]), ac = (c[2] - c[0]) / (c[3] - c[1]);
+      const s = Math.sqrt(area(c) / area(r));
+      if (ar / ac > 1.33 || ac / ar > 1.33 || s < FOLLOW_ZOOM[0] || s > FOLLOW_ZOOM[1]) continue;
+      const v = { s, tx: (c[0] + c[2]) / 2 - s * (r[0] + r[2]) / 2, ty: (c[1] + c[3]) / 2 - s * (r[1] + r[3]) / 2 };
+      const p = matches(R, C, v);
+      if (p.length > pairs.length || (p.length === pairs.length && p.length > 0 && off(v) < off(best))) { best = v; pairs = p; }
+    }
+  }
+  if (pairs.length < need) return null;
+  let view = solve(pairs);
+  const again = matches(R, C, view);
+  if (again.length >= pairs.length) { pairs = again; view = solve(again); }
+  return { view, matched: pairs.length };
+}
+
+/** A small grayscale copy of a frame (see toGray), for refineView. */
+export interface Gray { w: number; h: number; px: Uint8Array }
+
+/** Half-size copy (2x2 mean). */
+export function halve(g: Gray): Gray {
+  const w = g.w >> 1, h = g.h >> 1, px = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = 2 * y * g.w + 2 * x;
+    px[y * w + x] = (g.px[i] + g.px[i + 1] + g.px[i + g.w] + g.px[i + g.w + 1] + 2) >> 2;
+  }
+  return { w, h, px };
+}
+
+/** Brightness of a Gray normalized to mean 0, spread 1 (so a camera that adjusts its exposure still matches). */
+export function normGray(g: Gray): { w: number; h: number; px: Float32Array } {
+  let m = 0, v = 0;
+  for (const p of g.px) m += p;
+  m /= g.px.length;
+  for (const p of g.px) v += (p - m) ** 2;
+  const sd = Math.sqrt(v / g.px.length) || 1, px = new Float32Array(g.px.length);
+  for (let i = 0; i < px.length; i++) px[i] = (g.px[i] - m) / sd;
+  return { w: g.w, h: g.h, px };
+}
+type NGray = ReturnType<typeof normGray>;
+
+const CAP = 1; // a pixel that differs by more than this (in spreads) costs no more: products taken away do not pull the match
+
+/**
+ * How well the reference picture, put where `v` says, matches the current one: 1 - mean capped difference over the
+ * pixels both share (higher is better), or -1 when they share less than half of the current frame.
+ */
+export function viewScore(ref: NGray, cur: NGray, v: View): number {
+  const col = new Int32Array(cur.w);
+  for (let x = 0; x < cur.w; x++) {
+    const q = ((x + 0.5) / cur.w - v.tx) / v.s;
+    col[x] = q >= 0 && q < 1 ? Math.floor(q * ref.w) : -1;
+  }
+  let n = 0, cost = 0;
+  for (let y = 0; y < cur.h; y++) {
+    const q = ((y + 0.5) / cur.h - v.ty) / v.s;
+    if (q < 0 || q >= 1) continue;
+    const ro = Math.floor(q * ref.h) * ref.w, co = y * cur.w;
+    for (let x = 0; x < cur.w; x++) {
+      const rx = col[x];
+      if (rx < 0) continue;
+      n++;
+      cost += Math.min(CAP, Math.abs(cur.px[co + x] - ref.px[ro + rx]));
+    }
+  }
+  return n < (cur.w * cur.h) / 2 ? -1 : 1 - cost / n;
+}
+
+/** Best view on a grid around v; `sharp` = how far the best stands above the average of the grid (a flat grid = no match). */
+function bestAround(ref: NGray, cur: NGray, v: View, sSpan: number, sStep: number, tSpan: number, tStep: number): { view: View; score: number; sharp: number } {
+  let best = { view: v, score: viewScore(ref, cur, v) }, sum = 0, n = 0;
+  for (let ds = -sSpan; ds <= sSpan + 1e-9; ds += sStep) {
+    const s = v.s * (1 + ds);
+    if (s < FOLLOW_ZOOM[0] || s > FOLLOW_ZOOM[1]) continue;
+    for (let dx = -tSpan; dx <= tSpan + 1e-9; dx += tStep) for (let dy = -tSpan; dy <= tSpan + 1e-9; dy += tStep) {
+      const w = { s, tx: v.tx + dx, ty: v.ty + dy };
+      const sc = viewScore(ref, cur, w);
+      if (sc > -1) { sum += sc; n++; }
+      if (sc > best.score) best = { view: w, score: sc };
+    }
+  }
+  return { ...best, sharp: n ? best.score - sum / n : 0 };
+}
+
+/**
+ * Fine-tune a view by the pictures themselves: product boxes are only a rough guide (a detector box is often loose
+ * on one side, and products cut by the frame edge are boxed short), the shelf, the pegboard and the products left
+ * on it line up exactly only at the right zoom + pan. Coarse search on half-size images, then fine on full size.
+ * Each start (e.g. the box fit and the last view) is searched and the best match wins. The score alone says little
+ * (a shelf with half its products gone matches badly everywhere), so `sharp` says how clearly the best view stands
+ * out from the views around it on the coarse grid: near 0 means the picture no longer looks like the shelf.
+ */
+export function refineView(ref: Gray, cur: Gray, starts: View[]): { view: View; score: number; sharp: number } {
+  const r1 = normGray(ref), c1 = normGray(cur), r2 = normGray(halve(ref)), c2 = normGray(halve(cur));
+  let best = { view: starts[0], score: -2, sharp: 0 };
+  for (const v of starts) {
+    const coarse = bestAround(r2, c2, v, 0.15, 0.03, 0.12, 0.02);
+    const fine = bestAround(r1, c1, coarse.view, 0.03, 0.01, 0.02, 0.005);
+    if (fine.score > best.score) best = { view: fine.view, score: fine.score, sharp: coarse.sharp };
+  }
+  return best;
+}
