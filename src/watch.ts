@@ -4,7 +4,7 @@
 import type { Agent, Backend } from "./agent-contract";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
-import { autoSlots, clipRect, cropLabel, endMessage, fitView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
+import { autoSlots, clipRect, cropLabel, endMessage, fitViews, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
 
 const INTERVAL_MS = 1000;
 const CLEAR_MS = 3000;
@@ -324,8 +324,8 @@ async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdM
 }
 
 /**
- * Where the reference frame is in this frame now (zoom + pan): a rough guess from the product boxes the shelf model
- * sees on the whole frame (fitView), pinned down by matching a small grayscale copy of both frames (refineView).
+ * Where the reference frame is in this frame now (zoom + pan): rough guesses from the product boxes the shelf model
+ * sees on the whole frame (fitViews), pinned down and chosen by matching a small grayscale copy of both frames (refineView).
  */
 async function followView(frame: ImageBitmap, conf: number): Promise<number> {
   const r = await agent!.detect(frame, { conf, shelfOnly: true });
@@ -335,9 +335,10 @@ async function followView(frame: ImageBitmap, conf: number): Promise<number> {
   if (!refBoxes || !refGray) {
     refBoxes = boxes; refGray = gray; view = IDENTITY; lost = 0;
   } else {
-    const f = fitView(refBoxes, boxes, view);
+    // every view the boxes allow (a shelf of equal-sized products in a grid can fit one column off), then the pictures pick one
+    const starts = [...fitViews(refBoxes, boxes, view).map((f) => f.view), view];
     await breathe();
-    const m = refineView(refGray, gray, f ? [f.view, view] : [view]);
+    const m = refineView(refGray, gray, starts);
     if (m.sharp >= MIN_SHARP) { view = m.view; lost = 0; } else lost++; // keep the last view
   }
   setStatus(watchStatus());

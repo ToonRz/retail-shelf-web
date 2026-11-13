@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Box } from "../src/agent-contract";
-import { autoSlots, cropLabel, clipRect, cropRect, dragToRect, endMessage, fitView, type Gray, IDENTITY, refineView, mapRect, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME } from "../src/ui/watch-logic";
+import { autoSlots, cropLabel, clipRect, cropRect, dragToRect, endMessage, fitView, fitViews, type Gray, IDENTITY, refineView, mapRect, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME } from "../src/ui/watch-logic";
 
 const cfg = { holdMs: 10_000, clearMs: 3_000 };
 const box = (x1: number, y1: number, x2: number, y2: number): Box => ({ cls: "product", classId: 0, conf: 0.9, xyxy: [x1, y1, x2, y2] });
@@ -203,6 +203,16 @@ describe("follow the view", () => {
     near(fitView(row, row.map(([a, b, c, d]) => [a + 0.05, b, c + 0.05, d] as NBox), prev)!.view, 1, 0.05, 0);
   });
 
+  it("offers every view that fits a grid of equal products zoomed so a column is out of the frame", () => {
+    // 4 columns x 2 rows of the same size; zoom on the right 3 columns: one column to the left fits the 6 boxes as well
+    const grid: NBox[] = [0, 1].flatMap((r) => [0, 1, 2, 3].map((c) => [0.03 + c * 0.24, 0.1 + r * 0.42, 0.21 + c * 0.24, 0.45 + r * 0.42] as NBox));
+    const s = 1 / 0.72, truth = { s, tx: -0.27 * s, ty: -0.05 };
+    const cur = cut(move(grid, truth.s, truth.tx, truth.ty)).filter(([a, , c]) => c - a > 0.1);
+    const views = fitViews(grid, cur, IDENTITY).map((f) => f.view);
+    expect(views.some((v) => Math.abs(v.s - truth.s) < 0.01 && Math.abs(v.tx - truth.tx) < 0.01 && Math.abs(v.ty - truth.ty) < 0.01)).toBe(true);
+    expect(views.some((v) => Math.abs(v.tx - (truth.tx + 0.24 * s)) < 0.01)).toBe(true); // one column off
+  });
+
   it("gives up when nothing agrees", () => {
     expect(fitView(ref, [], IDENTITY)).toBeNull();
     expect(fitView(ref, [[0.4, 0.4, 0.42, 0.9]], IDENTITY)).toBeNull();
@@ -239,6 +249,17 @@ describe("refineView", () => {
     expect(Math.abs(r.view.ty + 0.135)).toBeLessThan(0.01);
     expect(r.score).toBeGreaterThan(0.7);
     expect(r.sharp).toBeGreaterThan(0.05);
+  });
+
+  it("picks the true view among views one product apart, with the reference seen whole on a dark wall", () => {
+    // reference: the whole shelf shrunk into the middle of the frame (dark wall around it); now: zoomed on its right part
+    const refView = { s: 0.7, tx: 0.15, ty: 0.15 }, truth = { s: 1.2, tx: -0.35, ty: -0.1 };
+    const at = (v: typeof truth) => ({ s: v.s / refView.s, tx: v.tx - (v.s / refView.s) * refView.tx, ty: v.ty - (v.s / refView.s) * refView.ty });
+    const shifted = { ...truth, tx: truth.tx + 0.33 * truth.s }; // one product to the left
+    const r = refineView(render(refView), render(truth), [at(shifted), at({ ...truth, tx: truth.tx + 0.02 })]);
+    expect(Math.abs(r.view.s - at(truth).s)).toBeLessThan(0.03);
+    expect(Math.abs(r.view.tx - at(truth).tx)).toBeLessThan(0.015);
+    expect(Math.abs(r.view.ty - at(truth).ty)).toBeLessThan(0.015);
   });
 
   it("finds no clear match on a picture of something else", () => {

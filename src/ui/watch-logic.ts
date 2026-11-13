@@ -280,35 +280,53 @@ function solve(pairs: Array<[NBox, NBox]>): View {
   };
 }
 
+const FOLLOW_MAX_VIEWS = 6; // candidate views handed to refineView
+
 /**
- * Find the view of this frame from the product boxes of the reference picture and of this frame. Products taken
- * away (or new ones) just do not match; the rest agree on one zoom + pan. Starts from the last view; only when that
- * no longer fits (a fast zoom) every reference / current pair is tried as a guess, and on a tie (a row of identical
- * products) the guess closest to the last view wins; guesses come from products whole in the frame, but products
- * cut by the frame edge still count as matches. null when fewer than 2 products (1 if there is only 1) agree.
+ * Candidate views of this frame from the product boxes of the reference picture and of this frame, best first.
+ * Products taken away (or new ones) just do not match; the rest agree on one zoom + pan. Every reference / current
+ * pair is tried as a guess (guesses come from products whole in the frame, but products cut by the frame edge still
+ * count as matches), as well as the last view.
+ *
+ * Boxes alone cannot always tell where the frame is: on a shelf of equal-sized products in a grid, zoomed so that
+ * some columns are out of the frame, the view shifted by one column matches just as many boxes as the true one
+ * (it brings the next column into the frame instead). So every view that matches nearly as many boxes as the best
+ * one is returned, and refineView picks among them by the pictures. Equal matches: closest to the last view first.
+ * Empty when fewer than 2 products (1 if there is only 1) agree.
  */
-export function fitView(ref: NBox[], cur: NBox[], prev: View): { view: View; matched: number } | null {
+export function fitViews(ref: NBox[], cur: NBox[], prev: View): Array<{ view: View; matched: number }> {
   const big = (bs: NBox[]) => [...bs].filter((b) => area(b) > 0).sort((a, b) => area(b) - area(a)).slice(0, FOLLOW_MAX_BOXES);
   const R = big(ref), C = big(cur);
   const need = Math.min(2, R.length, C.length);
-  if (need === 0) return null;
-  let best = prev, pairs = matches(R, C, prev);
-  if (pairs.length < Math.max(need, 0.5 * Math.min(R.length, C.length))) {
-    const off = (v: View) => Math.abs(Math.log(v.s / prev.s)) + Math.abs(v.tx - prev.tx) + Math.abs(v.ty - prev.ty);
-    for (const r of R) for (const c of C.filter(whole)) { // a cut box has the wrong size: no guess from it
-      const ar = (r[2] - r[0]) / (r[3] - r[1]), ac = (c[2] - c[0]) / (c[3] - c[1]);
-      const s = Math.sqrt(area(c) / area(r));
-      if (ar / ac > 1.33 || ac / ar > 1.33 || s < FOLLOW_ZOOM[0] || s > FOLLOW_ZOOM[1]) continue;
-      const v = { s, tx: (c[0] + c[2]) / 2 - s * (r[0] + r[2]) / 2, ty: (c[1] + c[3]) / 2 - s * (r[1] + r[3]) / 2 };
-      const p = matches(R, C, v);
-      if (p.length > pairs.length || (p.length === pairs.length && p.length > 0 && off(v) < off(best))) { best = v; pairs = p; }
-    }
+  if (need === 0) return [];
+  const off = (v: View) => Math.abs(Math.log(v.s / prev.s)) + Math.abs(v.tx - prev.tx) + Math.abs(v.ty - prev.ty);
+  const same = (a: View, b: View) => Math.abs(Math.log(a.s / b.s)) < 0.04 && Math.abs(a.tx - b.tx) < 0.03 && Math.abs(a.ty - b.ty) < 0.03;
+  const guesses: Array<{ view: View; pairs: Array<[NBox, NBox]> }> = [{ view: prev, pairs: matches(R, C, prev) }];
+  for (const r of R) for (const c of C.filter(whole)) { // a cut box has the wrong size: no guess from it
+    const ar = (r[2] - r[0]) / (r[3] - r[1]), ac = (c[2] - c[0]) / (c[3] - c[1]);
+    const s = Math.sqrt(area(c) / area(r));
+    if (ar / ac > 1.33 || ac / ar > 1.33 || s < FOLLOW_ZOOM[0] || s > FOLLOW_ZOOM[1]) continue;
+    const view = { s, tx: (c[0] + c[2]) / 2 - s * (r[0] + r[2]) / 2, ty: (c[1] + c[3]) / 2 - s * (r[1] + r[3]) / 2 };
+    guesses.push({ view, pairs: matches(R, C, view) });
   }
-  if (pairs.length < need) return null;
-  let view = solve(pairs);
-  const again = matches(R, C, view);
-  if (again.length >= pairs.length) { pairs = again; view = solve(again); }
-  return { view, matched: pairs.length };
+  const top = Math.max(...guesses.map((g) => g.pairs.length));
+  if (top < need) return [];
+  const out: Array<{ view: View; matched: number }> = [];
+  for (const g of guesses.filter((x) => x.pairs.length >= Math.max(need, top - 1))) {
+    let pairs = g.pairs, view = solve(pairs);
+    const again = matches(R, C, view);
+    if (again.length >= pairs.length) { pairs = again; view = solve(again); }
+    if (view.s < FOLLOW_ZOOM[0] || view.s > FOLLOW_ZOOM[1]) continue;
+    const dup = out.find((o) => same(o.view, view));
+    if (!dup) out.push({ view, matched: pairs.length });
+    else if (pairs.length > dup.matched || (pairs.length === dup.matched && off(view) < off(dup.view))) Object.assign(dup, { view, matched: pairs.length });
+  }
+  return out.sort((a, b) => b.matched - a.matched || off(a.view) - off(b.view)).slice(0, FOLLOW_MAX_VIEWS);
+}
+
+/** The best of fitViews, or null. */
+export function fitView(ref: NBox[], cur: NBox[], prev: View): { view: View; matched: number } | null {
+  return fitViews(ref, cur, prev)[0] ?? null;
 }
 
 /** A small grayscale copy of a frame (see toGray), for refineView. */
@@ -324,47 +342,53 @@ export function halve(g: Gray): Gray {
   return { w, h, px };
 }
 
-/** Brightness of a Gray normalized to mean 0, spread 1 (so a camera that adjusts its exposure still matches). */
-export function normGray(g: Gray): { w: number; h: number; px: Float32Array } {
-  let m = 0, v = 0;
-  for (const p of g.px) m += p;
-  m /= g.px.length;
-  for (const p of g.px) v += (p - m) ** 2;
-  const sd = Math.sqrt(v / g.px.length) || 1, px = new Float32Array(g.px.length);
-  for (let i = 0; i < px.length; i++) px[i] = (g.px[i] - m) / sd;
-  return { w: g.w, h: g.h, px };
-}
-type NGray = ReturnType<typeof normGray>;
-
 const CAP = 1; // a pixel that differs by more than this (in spreads) costs no more: products taken away do not pull the match
 
 /**
  * How well the reference picture, put where `v` says, matches the current one: 1 - mean capped difference over the
- * pixels both share (higher is better), or -1 when they share less than half of the current frame.
+ * pixels both share (higher is better), or -1 when they share less than half of the current frame. Brightness is
+ * brought to mean 0, spread 1 over the shared pixels only (so a camera that adjusts its exposure still matches): over
+ * the whole pictures, the dark wall around a shelf seen whole would make the same shelf look brighter in the
+ * reference than in a zoomed frame that is all shelf, and the best match would land beside the truth.
  */
-export function viewScore(ref: NGray, cur: NGray, v: View): number {
+export function viewScore(ref: Gray, cur: Gray, v: View): number {
   const col = new Int32Array(cur.w);
   for (let x = 0; x < cur.w; x++) {
     const q = ((x + 0.5) / cur.w - v.tx) / v.s;
     col[x] = q >= 0 && q < 1 ? Math.floor(q * ref.w) : -1;
   }
-  let n = 0, cost = 0;
+  const row = new Int32Array(cur.h);
   for (let y = 0; y < cur.h; y++) {
     const q = ((y + 0.5) / cur.h - v.ty) / v.s;
-    if (q < 0 || q >= 1) continue;
-    const ro = Math.floor(q * ref.h) * ref.w, co = y * cur.w;
+    row[y] = q >= 0 && q < 1 ? Math.floor(q * ref.h) * ref.w : -1;
+  }
+  let n = 0, sr = 0, srr = 0, sc = 0, scc = 0;
+  for (let y = 0; y < cur.h; y++) {
+    const ro = row[y], co = y * cur.w;
+    if (ro < 0) continue;
     for (let x = 0; x < cur.w; x++) {
-      const rx = col[x];
-      if (rx < 0) continue;
-      n++;
-      cost += Math.min(CAP, Math.abs(cur.px[co + x] - ref.px[ro + rx]));
+      if (col[x] < 0) continue;
+      const a = ref.px[ro + col[x]], b = cur.px[co + x];
+      n++; sr += a; srr += a * a; sc += b; scc += b * b;
     }
   }
-  return n < (cur.w * cur.h) / 2 ? -1 : 1 - cost / n;
+  if (n < (cur.w * cur.h) / 2) return -1;
+  const mr = sr / n, mc = sc / n;
+  const kr = 1 / (Math.sqrt(Math.max(0, srr / n - mr * mr)) || 1), kc = 1 / (Math.sqrt(Math.max(0, scc / n - mc * mc)) || 1);
+  let cost = 0;
+  for (let y = 0; y < cur.h; y++) {
+    const ro = row[y], co = y * cur.w;
+    if (ro < 0) continue;
+    for (let x = 0; x < cur.w; x++) {
+      if (col[x] < 0) continue;
+      cost += Math.min(CAP, Math.abs((cur.px[co + x] - mc) * kc - (ref.px[ro + col[x]] - mr) * kr));
+    }
+  }
+  return 1 - cost / n;
 }
 
 /** Best view on a grid around v; `sharp` = how far the best stands above the average of the grid (a flat grid = no match). */
-function bestAround(ref: NGray, cur: NGray, v: View, sSpan: number, sStep: number, tSpan: number, tStep: number): { view: View; score: number; sharp: number } {
+function bestAround(ref: Gray, cur: Gray, v: View, sSpan: number, sStep: number, tSpan: number, tStep: number): { view: View; score: number; sharp: number } {
   let best = { view: v, score: viewScore(ref, cur, v) }, sum = 0, n = 0;
   for (let ds = -sSpan; ds <= sSpan + 1e-9; ds += sStep) {
     const s = v.s * (1 + ds);
@@ -383,16 +407,23 @@ function bestAround(ref: NGray, cur: NGray, v: View, sSpan: number, sStep: numbe
  * Fine-tune a view by the pictures themselves: product boxes are only a rough guide (a detector box is often loose
  * on one side, and products cut by the frame edge are boxed short), the shelf, the pegboard and the products left
  * on it line up exactly only at the right zoom + pan. Coarse search on half-size images, then fine on full size.
- * Each start (e.g. the box fit and the last view) is searched and the best match wins. The score alone says little
+ * Each start (the candidates of fitViews and the last view) is searched and the best match wins: this is also what
+ * tells a view shifted by one product from the true one, as the products differ even where their boxes do not.
+ * With many starts, a quick look around each keeps the two best for the full search. The score alone says little
  * (a shelf with half its products gone matches badly everywhere), so `sharp` says how clearly the best view stands
  * out from the views around it on the coarse grid: near 0 means the picture no longer looks like the shelf.
  */
 export function refineView(ref: Gray, cur: Gray, starts: View[]): { view: View; score: number; sharp: number } {
-  const r1 = normGray(ref), c1 = normGray(cur), r2 = normGray(halve(ref)), c2 = normGray(halve(cur));
-  let best = { view: starts[0], score: -2, sharp: 0 };
-  for (const v of starts) {
+  const r2 = halve(ref), c2 = halve(cur);
+  let cands = starts;
+  if (starts.length > 2) {
+    cands = starts.map((v) => ({ v, score: bestAround(r2, c2, v, 0.06, 0.03, 0.04, 0.02).score }))
+      .sort((a, b) => b.score - a.score).slice(0, 2).map((x) => x.v);
+  }
+  let best = { view: cands[0], score: -2, sharp: 0 };
+  for (const v of cands) {
     const coarse = bestAround(r2, c2, v, 0.15, 0.03, 0.12, 0.02);
-    const fine = bestAround(r1, c1, coarse.view, 0.03, 0.01, 0.02, 0.005);
+    const fine = bestAround(ref, cur, coarse.view, 0.03, 0.01, 0.02, 0.005);
     if (fine.score > best.score) best = { view: fine.view, score: fine.score, sharp: coarse.sharp };
   }
   return best;
