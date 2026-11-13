@@ -4,10 +4,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { readAgentVersion } from "../vite.config";
 import { createMockAgent } from "../src/mockAgent";
+import { oneAtATime } from "../src/agent";
 
 describe("agent.version pin", () => {
-  it("the committed pin is valid", () => {
+  it("the committed pins are valid", () => {
     expect(readAgentVersion()).toMatch(/^(mock|v\d+\.\d+\.\d+)$/);
+    expect(readAgentVersion("agent-shelf.version")).toMatch(/^(mock|v\d+\.\d+\.\d+)$/);
   });
   it("refuses anything else", () => {
     const p = join(mkdtempSync(join(tmpdir(), "pin-")), "agent.version");
@@ -30,5 +32,32 @@ describe("mock agent", () => {
     }
     expect(r.boxes.map((b) => b.conf)).toEqual([...r.boxes.map((b) => b.conf)].sort((x, y) => y - x));
     expect((await a.detect({ width: 10, height: 10 } as ImageData, { conf: 0.9 })).boxes.every((b) => b.conf >= 0.9)).toBe(true);
+  });
+});
+
+describe("oneAtATime (two pages loading the same release)", () => {
+  it("runs calls with the same key one after another, even after a failure", async () => {
+    const log: string[] = [];
+    const job = (name: string, fail = false) => async () => {
+      log.push(`${name} start`);
+      await new Promise((r) => setTimeout(r, 5));
+      log.push(`${name} end`);
+      if (fail) throw new Error(name);
+      return name;
+    };
+    const a = oneAtATime("v9.9.9", job("a", true));
+    const b = oneAtATime("v9.9.9", job("b"));
+    await expect(a).rejects.toThrow("a");
+    await expect(b).resolves.toBe("b");
+    expect(log).toEqual(["a start", "a end", "b start", "b end"]);
+  });
+  it("does not make different keys wait", async () => {
+    const log: string[] = [];
+    let release!: () => void;
+    const slow = oneAtATime("v8.8.8", () => new Promise<void>((r) => { release = r; }));
+    await oneAtATime("v7.7.7", async () => { log.push("other"); });
+    expect(log).toEqual(["other"]);
+    release();
+    await slow;
   });
 });
