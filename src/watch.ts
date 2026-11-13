@@ -1,5 +1,5 @@
 // Shelf watch page: draw one box per product slot, then get an alert when a slot stays empty.
-// Each slot is cropped from the camera or a video file and checked for any product box (any class).
+// Each slot is cropped from the camera or a video file and checked for any product box with the 1-class shelf model only (shelfOnly).
 import type { Agent, Backend } from "./agent-contract";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
@@ -174,7 +174,7 @@ async function checkSlot(s: Slot, conf: number, cfg: { holdMs: number; clearMs: 
     const gray = toGray(thumbCtx.getImageData(0, 0, THUMB, THUMB).data);
     const prev = thumbs.get(s.id);
     thumbs.set(s.id, gray);
-    const r = await agent!.detect(crop, { conf });
+    const r = await agent!.detect(crop, { conf, shelfOnly: true }); // only "is there a box" matters here: skip the 110-class model
     const has = slotHasProduct(r.boxes, r.width, r.height);
     const { track, event } = stepTrack(tracks.get(s.id) ?? newTrack(), has, prev !== undefined && motionScore(prev, gray) > MOTION_BLOCKED, now(), cfg);
     tracks.set(s.id, track);

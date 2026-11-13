@@ -14,6 +14,7 @@ export interface DetectOptions {
   conf?: number;
   iou?: number;
   maxDet?: number;
+  shelfOnly?: boolean; // agent v0.3.2+: run only the 1-class shelf model (older releases ignore it and run both)
 }
 
 export interface DetectResult {
