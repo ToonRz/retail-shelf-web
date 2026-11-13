@@ -114,6 +114,7 @@
 
     /* shelf watch */
     #watchOverlay { touch-action: none; }
+    #watchImage { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
     #watchOverlay.drawable { cursor: crosshair; }
     .alert-banner { padding: 10px 16px; background: var(--bad); color: #fff; font-weight: 700; overflow-wrap: anywhere; }
     .watch-sliders { display: flex; flex: 1 1 100%; flex-wrap: wrap; gap: 8px 16px; }
@@ -247,10 +248,11 @@
   <main id="pageWatch" class="bench" hidden>
     <div class="stage" id="watchStage">
       <video id="watchVideo" playsinline muted hidden></video>
+      <img id="watchImage" alt="ภาพชั้นวาง" hidden>
       <canvas id="watchOverlay" hidden aria-label="ภาพชั้นวางและกรอบแต่ละช่อง"></canvas>
       <div class="empty" id="watchEmpty">
         <p class="empty-title">เฝ้าชั้นวางและแจ้งเตือนเมื่อของหมด</p>
-        <p>เปิดกล้องที่ตั้งนิ่ง ๆ หรือเลือกวิดีโอ แล้วกด "หาช่องอัตโนมัติ" ตอนชั้นเต็ม หรือลากกรอบรอบสินค้าแต่ละชนิดเอง</p>
+        <p>เลือกหรือลากรูป / วิดีโอตอนชั้นเต็มมาวาง แล้วระบบจะหาช่องให้เอง · หรือเปิดกล้องที่ตั้งนิ่ง ๆ แล้วกด "หาช่องอัตโนมัติ" หรือลากกรอบรอบสินค้าแต่ละชนิดเอง</p>
         <p class="fine">ภาพถูกประมวลผลในเครื่องนี้เท่านั้น ไม่ถูกส่งออกไปไหน</p>
       </div>
     </div>
@@ -258,8 +260,8 @@
     <div class="tray">
       <div class="actions">
         <button class="btn ghost" id="watchCamBtn" type="button" disabled>เปิดกล้อง</button>
-        <button class="btn ghost" id="watchFileBtn" type="button" disabled>เลือกวิดีโอ</button>
-        <input id="watchFile" type="file" accept="video/*" hidden>
+        <button class="btn ghost" id="watchFileBtn" type="button" disabled>เลือกรูป / วิดีโอ</button>
+        <input id="watchFile" type="file" accept="image/*,video/*" hidden>
         <button class="btn ghost" id="watchAutoBtn" type="button" disabled title="ใช้ตอนชั้นเต็ม: หาสินค้าทั้งภาพแล้วรวมสินค้าชนิดเดียวกันที่วางติดกันเป็นช่องเดียว">หาช่องอัตโนมัติ</button>
         <button class="btn" id="watchStartBtn" type="button" disabled>เริ่มเฝ้า</button>
         <button class="btn ghost" id="watchClearBtn" type="button" disabled>ลบทุกช่อง</button>
