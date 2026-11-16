@@ -126,9 +126,18 @@ describe("auto slots", () => {
     expect(autoSlots([], 100, 100)).toEqual([]);
   });
 
-  it("names 110-class boxes, leaves shelf-model boxes unknown and drops frame-sized boxes", () => {
-    const boxes = [named("pepsi", 3, 0, 0, 10, 10), named("product", 110, 20, 0, 30, 10), named("lays", 5, 0, 0, 100, 90)];
-    expect(toFoundItems(boxes, 110, 100, 100)).toEqual([{ name: "pepsi", xyxy: [0, 0, 10, 10] }, { name: null, xyxy: [20, 0, 30, 10] }]);
+  it("keeps one unnamed item per product: drops full-frame names, merges boxes of both models and frame-sized boxes", () => {
+    const boxes = [
+      named("pepsi", 3, 0, 0, 10, 10, 0.9),          // only the 110-class model saw it
+      named("toro", 5, 40, 0, 60, 20, 0.6),          // one product boxed twice under two names...
+      named("carada", 6, 41, 1, 60, 21, 0.3),
+      named("product", 110, 39, 0, 61, 22, 0.5),     // ...and by the shelf model: its box wins
+      named("product", 110, 70, 0, 80, 10, 0.4),
+      named("lays", 7, 0, 0, 100, 90),               // the whole frame
+    ];
+    expect(toFoundItems(boxes, 110, 100, 100)).toEqual([
+      { name: null, xyxy: [39, 0, 61, 22] }, { name: null, xyxy: [70, 0, 80, 10] }, { name: null, xyxy: [0, 0, 10, 10] },
+    ]);
   });
 
   it("takes the name of a crop from the most confident centred named box", () => {

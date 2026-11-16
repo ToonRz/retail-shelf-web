@@ -12,7 +12,8 @@ const MOTION_BLOCKED = 14; // mean gray change between checks (0-255) that means
 const THUMB = 32;
 const SLOTS_KEY = "watchSlots";
 const NAME_CONF = 0.5;  // a name from a crop below this is more often wrong than right: keep "สินค้าอื่น" instead
-const MAX_NAME_CROPS = 60; // unnamed boxes looked at one by one (~0.7 s each on WASM)
+const MAX_NAME_CROPS = 60; // products named one by one on a crop (~0.3-0.7 s each on WASM)
+const NAME_PADS = [0.15, 0.4]; // crop around a product box, grown by this much of its size on each side
 const GRAY_W = 128, GRAY_H = 96; // the small copy of each frame the view is matched on
 const MIN_SHARP = 0.03;   // refineView best stands out from its neighbours less than this: no clear match (lost)
 const MIN_VISIBLE = 0.4;   // a slot with less of it inside the frame (zoomed in) is not judged: its timers pause
@@ -167,9 +168,10 @@ ui.clearBtn.addEventListener("click", () => { slots = []; tracks = new Map(); re
 // ---------------------------------------------------------------- auto slots
 
 /**
- * One pass on the current frame (shelf should be full): both models on the whole frame, then every box the
- * 110-class model could not name is cropped and run again, because that model only recognises a product that
- * fills most of the picture. Same-name neighbours become one slot (autoSlots). Replaces the current slots.
+ * One pass on the current frame (shelf should be full): both models on the whole frame find the products, then every
+ * product is cropped and named by the 110-class model on its crop alone, because that model only recognises a
+ * product that fills most of the picture (its names on the whole frame are often wrong). Same-name neighbours
+ * become one slot (autoSlots). Replaces the current slots.
  */
 async function findSlots(ask = true) {
   if (!agent || running || finding || !hasFrame()) return;
@@ -196,15 +198,18 @@ async function findSlots(ask = true) {
     const classes = agent.manifest.model.classes;
     const r = await agent.detect(frame, { conf }); // no shelfOnly: names from the 110-class model + "product" boxes of the shelf model
     const items = toFoundItems(r.boxes, classes, r.width, r.height);
-    const unnamed = items.filter((i) => i.name === null).slice(0, MAX_NAME_CROPS);
-    for (const [k, it] of unnamed.entries()) {
-      await step(`กำลังระบุชื่อสินค้า ${k + 1} / ${unnamed.length}…`, k, unnamed.length);
-      const crop = await createImageBitmap(frame!, ...cropRect(it.xyxy, r.width, r.height));
-      try {
-        const c = await agent.detect(crop, { conf: Math.max(conf, NAME_CONF) });
-        it.name = cropLabel(c.boxes, classes, c.width, c.height);
-      } finally {
-        crop.close();
+    const toName = items.slice(0, MAX_NAME_CROPS);
+    for (const [k, it] of toName.entries()) {
+      await step(`กำลังระบุชื่อสินค้า ${k + 1} / ${toName.length}…`, k, toName.length);
+      for (const pad of NAME_PADS) { // a wider crop when the first one gives no confident name
+        const crop = await createImageBitmap(frame!, ...cropRect(it.xyxy, r.width, r.height, pad));
+        try {
+          const c = await agent.detect(crop, { conf: Math.max(conf, NAME_CONF) });
+          it.name = cropLabel(c.boxes, classes, c.width, c.height);
+        } finally {
+          crop.close();
+        }
+        if (it.name) break;
       }
     }
     // The shelf is full now, so a slot the watch loop would already call empty (a stray box in the

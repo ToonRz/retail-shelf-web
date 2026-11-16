@@ -83,7 +83,7 @@ export function parseSlots(json: string | null): Slot[] {
 
 // ---------------------------------------------------------------- auto slots
 
-/** A product found on the full frame: name from the 110-class model, null when it is only a shelf-model "product" box. */
+/** A product found on the full frame; name from the 110-class model on a crop of it (null until then, or when it has none). */
 export interface FoundItem { name: string | null; xyxy: [number, number, number, number] }
 
 export const UNKNOWN_NAME = "สินค้าอื่น";
@@ -92,11 +92,30 @@ const AUTO_PAD = 0.04;              // slot = union of its boxes grown by this m
 const AUTO_MAX_GAP = 0.5;           // same-name neighbours further apart than this many box widths start a new slot
 const AUTO_MAX_AREA = 0.4;          // a box covering more of the frame than this is not one product on a shelf
 
-/** Named boxes keep their class; boxes of the shelf model (classId >= classes of the 110-class model) are unknown. */
+const AUTO_SAME = 0.6;               // two boxes sharing this much of the smaller one are one product seen by both models
+
+/**
+ * One item per product seen on the full frame, all still unnamed. Both models box the same product (and the 110-class
+ * model sometimes twice, under two names), so boxes that mostly overlap are one item: shelf-model boxes first (the
+ * watch loop judges slots with that model), then the rest by confidence. Names from the full frame are dropped: the
+ * 110-class model was trained on pictures one product fills, and on a whole shelf it names products wrongly even when
+ * it is confident (a "Hanami" bag as "oishi-japanese-rice" at 0.58, a "Jele" pouch as "manorah" at 0.77), while a crop
+ * of each product alone comes back right (cropLabel). Boxes covering most of the frame are not one product on a shelf.
+ */
 export function toFoundItems(boxes: Box[], classes: number, width: number, height: number): FoundItem[] {
-  return boxes
-    .filter(({ xyxy: [x1, y1, x2, y2] }) => ((x2 - x1) * (y2 - y1)) / (width * height) <= AUTO_MAX_AREA)
-    .map((b) => ({ name: b.classId < classes ? b.cls : null, xyxy: b.xyxy }));
+  const area = ([x1, y1, x2, y2]: Box["xyxy"]) => Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const kept: FoundItem[] = [];
+  const order = boxes
+    .filter((b) => area(b.xyxy) / (width * height) <= AUTO_MAX_AREA)
+    .sort((a, b) => Number(b.classId >= classes) - Number(a.classId >= classes) || b.conf - a.conf);
+  for (const b of order) {
+    const same = kept.some(({ xyxy: k }) => {
+      const i = area([Math.max(k[0], b.xyxy[0]), Math.max(k[1], b.xyxy[1]), Math.min(k[2], b.xyxy[2]), Math.min(k[3], b.xyxy[3])]);
+      return i >= AUTO_SAME * Math.min(area(k), area(b.xyxy));
+    });
+    if (!same) kept.push({ name: null, xyxy: b.xyxy });
+  }
+  return kept;
 }
 
 /** Pixel rect [x, y, w, h] around a box grown by pad of its size on each side, clamped to the frame (for createImageBitmap). */
