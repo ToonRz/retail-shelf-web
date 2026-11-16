@@ -50,6 +50,8 @@
 · เวลา `detect()` รวมแสดงแยกจากเวลาทั้งรอบ (รวมรอ/นำเสนอ); `latency_ms` ของ agent รวม preprocess/run/postprocess ไม่ใช่ inference ล้วน
 · บันทึก `detect()` แบบละเอียดและ JSON ล่าสุดอยู่ใน "บันทึกการเรียก agent (สำหรับนักพัฒนา)" ด้านขวา
 
+**วิดีโอทดสอบ:** `public/samples/demo-shelf.mp4` (2 นาที ชั้นสังเคราะห์ 6 ช่อง มีของหมด 3 ช่อง เติมของ 1 ช่อง คนเดินผ่าน 1 ครั้ง) · timeline และผลที่ควรได้อยู่ใน `public/samples/README.md` · สร้างใหม่ด้วย `python3 scripts/make-demo-video.py`
+
 ## agent.version
 
 | ค่า | ผล |
