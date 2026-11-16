@@ -11,7 +11,10 @@ import { autoSlots, clipRect, composeView, relView, cropLabel, endMessage, evide
 const INTERVAL_MS = 1000;
 const MAX_FALLBACKS_PER_ROUND = 2;
 const FALLBACK_BUDGET_MS = 900;
-const MAX_OBSERVATION_GAP_MS = 5000;
+// A slot not looked at for this long restarts its empty timer. Rounds on a slow device (WASM, many slots) or the
+// round-robin crop queue can leave several seconds between looks at one slot, so this must stay well above that:
+// at 5 s an empty slot that is only seen every 6 s never reached "ของหมด". Seeks reset the timers on their own.
+const MAX_OBSERVATION_GAP_MS = 60_000;
 const CLEAR_MS = 3000;
 const MOTION_BLOCKED = 14; // mean gray change between checks (0-255) that means someone is in front of the slot
 const THUMB = 32;
@@ -184,9 +187,13 @@ function displayStatus(s: Slot): DisplayStatus {
   if (isAway(s)) return "away";
   const result = results.get(s.id);
   if (!result) return "unknown";
-  if (evidenceAge(result, isVideoFile(), now(), performance.now()).stale) return "stale";
-  return tracks.get(s.id)?.status ?? "unknown";
+  const status = tracks.get(s.id)?.status ?? "unknown";
+  if (status === "out") return "out"; // a raised alert stays up until the slot is seen filled again
+  if (evidenceAge(result, isVideoFile(), now(), performance.now(), staleMs()).stale) return "stale";
+  return status;
 }
+// Evidence counts as fresh for the hold time (at least 5 s): an alert needs that long a stretch anyway.
+const staleMs = () => Math.max(5000, Number(ui.hold.value) * 1000);
 
 // ---------------------------------------------------------------- draw
 
@@ -694,7 +701,7 @@ function updateTimeline() {
     const result = results.get(row.dataset.slotId!);
     const stamp = row.querySelector(".frame-stamp");
     if (stamp && result) {
-      const age = evidenceAge(result, isVideoFile(), now(), monotonicNow);
+      const age = evidenceAge(result, isVideoFile(), now(), monotonicNow, staleMs());
       const timeline = age.timelineMs === null ? "" : ` · Δคลิป ${(age.timelineMs / 1000).toFixed(1)} s`;
       stamp.textContent = `#${result.id} · ${(result.time / 1000).toFixed(2)} s · อายุจริง ${(age.realtimeMs / 1000).toFixed(1)} s${timeline}`;
     }
@@ -773,6 +780,18 @@ function closeSource() {
   updateControls();
 }
 
+/**
+ * A paused file at "loadeddata" may not have a decoded picture yet: drawing it then gives a blank (all black) frame,
+ * and auto slots on it finds nothing. Play until the first frame is presented, then hold it there.
+ */
+async function showFirstFrame() {
+  if (!("requestVideoFrameCallback" in ui.video)) return;
+  const shown = new Promise<void>((res) => { ui.video.requestVideoFrameCallback(() => res()); setTimeout(res, 2000); });
+  try { await ui.video.play(); } catch { return; }
+  await shown;
+  ui.video.pause();
+}
+
 async function showSource(token: number) {
   if (isImage) {
     await ui.image.decode();
@@ -789,6 +808,7 @@ async function showSource(token: number) {
     });
     if (token !== sourceEpoch) throw cancelled;
     if (stream) await ui.video.play();
+    else await showFirstFrame();
   }
   if (token !== sourceEpoch) throw cancelled;
   wantsPlay = !!stream;

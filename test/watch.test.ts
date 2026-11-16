@@ -130,7 +130,12 @@ describe("evidence age", () => {
   const frame = { time: 10_000, captured: 1_000 };
   it("keeps real age separate from a paused video timeline", () => {
     expect(evidenceAge(frame, true, 10_000, 4_000)).toEqual({ realtimeMs: 3_000, timelineMs: 0, stale: false });
-    expect(evidenceAge(frame, true, 10_000, 7_000).stale).toBe(true);
+    // paused or ended: the clip still shows that picture, so waiting does not make the result stale
+    expect(evidenceAge(frame, true, 10_000, 60_000).stale).toBe(false);
+  });
+  it("takes a longer stale limit when rounds are slow", () => {
+    expect(evidenceAge(frame, true, 16_000, 1_500, 15_000).stale).toBe(false);
+    expect(evidenceAge(frame, false, 0, 7_000, 15_000).stale).toBe(false);
   });
   it("marks a fast-moving timeline stale even when little real time has passed", () => {
     expect(evidenceAge(frame, true, 16_000, 1_500)).toEqual({ realtimeMs: 500, timelineMs: 6_000, stale: true });

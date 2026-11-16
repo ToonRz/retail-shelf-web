@@ -278,10 +278,14 @@ export function fallbackCursorAfter(slots: Slot[], processed: Slot[], cursor: nu
   return (slots.indexOf(processed[processed.length - 1]) + 1) % slots.length;
 }
 
-export function evidenceAge(frame: { time: number; captured: number }, video: boolean, mediaNow: number, monotonicNow: number) {
+/**
+ * How old a slot's evidence is. A file is judged on its own timeline only: a paused or ended clip still shows the
+ * picture the evidence came from, so wall-clock time alone never makes it stale. A camera is judged in real time.
+ */
+export function evidenceAge(frame: { time: number; captured: number }, video: boolean, mediaNow: number, monotonicNow: number, staleMs = 5000) {
   const realtimeMs = Math.max(0, monotonicNow - frame.captured);
   const timelineMs = video ? Math.max(0, mediaNow - frame.time) : null;
-  return { realtimeMs, timelineMs, stale: realtimeMs > 5000 || (timelineMs !== null && timelineMs > 5000) };
+  return { realtimeMs, timelineMs, stale: timelineMs !== null ? timelineMs > staleMs : realtimeMs > staleMs };
 }
 
 const mapBox = ([x1, y1, x2, y2]: NBox, v: View): NBox => [v.s * x1 + v.tx, v.s * y1 + v.ty, v.s * x2 + v.tx, v.s * y2 + v.ty];

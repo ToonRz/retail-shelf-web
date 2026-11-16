@@ -39,3 +39,24 @@ The 19-second wall-time difference is measured but not attributed. Chrome's acti
 - WebGPU was exercised on the actual clip. The WASM fallback was not measured in this browser session. The agent API has no cancellation method; an in-flight call is allowed to finish and its result is discarded after a stop, seek, or source-generation change. No Web Worker was added; the worker/ONNX runtime path was not verified end to end.
 - Unit tests cover slow detector serialization/no backlog/latest-frame capture, shared timestamps, stop/pause/seek/end/source replacement, playback speed, frame-to-slot matching, small boxes, overlap ambiguity, camera transforms, fair fallback scheduling, stale evidence, and observation-gap handling. They do not establish shelf-level precision/recall.
 - The supplied clip was used for model and browser checks; no single product image was substituted for shelf validation. Physical camera behavior, a physical mobile device, Safari/iOS, WASM fallback performance, ground-truth matching accuracy, and out-of-stock event recall were not validated.
+
+## Follow-up check from the real UI — 2026-11-16 (later)
+
+Re-tested in headless Chromium (WASM backend, agent `v0.3.2`) against the version before the live mode (`912bbb9`), on synthetic shelves built from `public/samples/` (4 slots: 3× copp, hanami, lays, pocky each; and 12 slots alternating). In both clips the lays slot empties at 0:08 and stays empty, hold 15 s.
+
+| Check | `912bbb9` | `060b35f` | After this fix |
+| --- | --- | --- | --- |
+| Open a video file → auto slots | 4 / 12 slots, names correct | **0 slots** (frame captured all black, mean pixel 0) | 4 / 12 slots, names correct |
+| Still picture → auto slots | 4 slots, names correct | same rects and names | same |
+| 4 slots, full-frame mode | alert 0:30 | alert 0:25.45 (after re-clicking auto slots) | alert 0:24.39 |
+| 12 slots, crop-per-slot mode (≈6 s rounds on WASM) | alert 0:39 | **no alert; every slot "ผลเก่า"** | alert 0:29.81 |
+| 12 slots, full-frame mode | — | alert 0:26.03 | alert 0:25.74 |
+| Video ended / paused 10 s after the alert | banner stays | **banner gone, count 0, every slot "ผลเก่า"** | banner and status stay |
+
+Causes and fixes (`src/watch.ts`, `src/ui/watch-logic.ts`):
+
+1. A paused file at `loadeddata` had no decoded picture yet, so auto slots ran on a blank frame. The file now plays until `requestVideoFrameCallback` reports the first frame, then pauses there (what `912bbb9` did).
+2. `MAX_OBSERVATION_GAP_MS = 5000` restarted a slot's empty timer whenever two looks at it were more than 5 s apart. Slow rounds or the round-robin crop queue made that the normal case, so the alert could never fire. Raised to 60 s; seeks already reset the timers.
+3. Evidence was marked stale after 5 s of wall-clock time even when the clip was paused or ended, which also hid raised alerts. A file is now judged on its own timeline only, the stale limit is the hold time (at least 5 s), and a raised "ของหมด" stays until the slot is seen filled.
+
+Naming (`cropLabel`, `autoSlots`, `NAME_CONF`) did not change between `912bbb9` and `060b35f`; on these clips both gave identical names and rects. The user's own clip was not available here, so naming on a real dense shelf was not re-checked.
