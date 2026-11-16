@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Box } from "../src/agent-contract";
-import { autoSlots, cropLabel, clipRect, cropRect, dragToRect, composeView, endMessage, evidenceAge, fallbackCursorAfter, fitView, fitViews, frameMotion, type Gray, pinView, IDENTITY, refineView, mapRect, matchFrameBoxes, nextFallbackSlots, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, statusText, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME, type Slot } from "../src/ui/watch-logic";
+import { autoSlots, looksAlike, lookOf, cropLabel, clipRect, cropRect, dragToRect, composeView, endMessage, evidenceAge, fallbackCursorAfter, fitView, fitViews, frameMotion, type Gray, pinView, IDENTITY, refineView, mapRect, matchFrameBoxes, nextFallbackSlots, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, statusText, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME, type Slot } from "../src/ui/watch-logic";
 
 const cfg = { holdMs: 10_000, clearMs: 3_000 };
 const box = (x1: number, y1: number, x2: number, y2: number): Box => ({ cls: "product", classId: 0, conf: 0.9, xyxy: [x1, y1, x2, y2] });
@@ -187,6 +187,23 @@ describe("auto slots", () => {
     // pepsi top: union 0..205 x 0..205 grown by 4 %
     expect(s[0].rect.map(r2)).toEqual([0, 0, r2((205 + 205 * 0.04) / 1000), r2((205 + 205 * 0.04) / 1000)]);
     expect(s.every(({ rect: [x, y, w, h] }) => x >= 0 && y >= 0 && x + w <= 1 && y + h <= 1)).toBe(true);
+  });
+
+  it("without a name the pictures decide: one product stays one slot, different unnamed products are split", () => {
+    const c = (name: string | null, x: number, rgb: number[], h = 70): FoundItem => ({ name, xyxy: [x, 100, x + 50, 100 + h], look: Array.from({ length: 48 }, (_, i) => rgb[i % 3]) });
+    const red = [200, 40, 40], green = [60, 170, 80];
+    // 3 facings the model was not sure of + 1 it named: one slot, with that name
+    const hanami = autoSlots([c(null, 0, red), c(null, 55, red), c(null, 110, [205, 45, 38]), c("hanami", 165, red)], 1000, 1000);
+    expect(hanami.map((x) => x.name)).toEqual(["hanami"]);
+    // unnamed neighbours of two products (colour), and of two sizes: not one slot
+    expect(autoSlots([c(null, 0, green), c(null, 55, green), c(null, 110, red), c(null, 165, red)], 1000, 1000).map((x) => x.name)).toEqual([UNKNOWN_NAME, `${UNKNOWN_NAME} 2`]);
+    expect(autoSlots([c(null, 0, red), c(null, 55, red, 110)], 1000, 1000).length).toBe(2);
+    // two different names still split, whatever they look like
+    expect(autoSlots([c("a", 0, red), c("b", 55, red)], 1000, 1000).map((x) => x.name)).toEqual(["a", "b"]);
+    expect(looksAlike(c(null, 0, red), c(null, 55, red))).toBe(true);
+    // lookOf: a 4x4 picture is its own grid, one cell per pixel
+    const px = new Uint8ClampedArray(64).map((_, i) => (i % 4 === 3 ? 255 : i));
+    expect(lookOf(px, 4)).toEqual(Array.from(px).filter((_, i) => i % 4 !== 3));
   });
 
   it("starts a new slot across a wide gap and finds rows whatever the input order", () => {

@@ -6,7 +6,7 @@ import { FlowView, type FlowStep } from "./flow";
 import { confirmVerdict, followVerdict, foundVerdict, nameVerdict, roundVerdict, slotVerdict, topNameConf } from "./ui/flow-logic";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
-import { autoSlots, clipRect, composeView, relView, cropLabel, endMessage, evidenceAge, fallbackCursorAfter, fitViews, frameMotion, MIN_SHARP, nextFallbackSlots, matchFrameBoxes, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, statusText, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
+import { autoSlots, lookOf, clipRect, composeView, relView, cropLabel, endMessage, evidenceAge, fallbackCursorAfter, fitViews, frameMotion, MIN_SHARP, nextFallbackSlots, matchFrameBoxes, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, statusText, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
 
 const INTERVAL_MS = 1000;
 // Crops of the slots the full frame left unclear are bounded by time only. A fixed 2 per round left an empty slot
@@ -419,6 +419,7 @@ async function findSlots(ask = true) {
     drawOverlay();
     const items = toFoundItems(r.boxes, classes, r.width, r.height);
     decide(foundVerdict(items.length), f);
+    for (const it of items) it.look = itemLook(frame, it.xyxy);
     const toName = items.slice(0, MAX_NAME_CROPS);
     for (const [k, it] of toName.entries()) {
       await step(`กำลังระบุชื่อสินค้า ${k + 1} / ${toName.length}…`, k, toName.length);
@@ -487,6 +488,13 @@ async function findSlots(ask = true) {
     updateTimeline();
     updateControls();
   }
+}
+
+/** The look (lookOf) of the middle 60 % of a product box: the rim is mostly shelf and neighbours. */
+function itemLook(frame: ImageBitmap, [x1, y1, x2, y2]: [number, number, number, number]) {
+  const w = x2 - x1, h = y2 - y1;
+  thumbCtx.drawImage(frame, x1 + w * 0.2, y1 + h * 0.2, Math.max(1, w * 0.6), Math.max(1, h * 0.6), 0, 0, THUMB, THUMB);
+  return lookOf(thumbCtx.getImageData(0, 0, THUMB, THUMB).data, THUMB);
 }
 
 ui.autoBtn.addEventListener("click", () => void findSlots());
