@@ -65,6 +65,7 @@ let liveBoxes: { boxes: DetectResult["boxes"]; frame: Frame } | null = null;
 const LIVE_BOX_MAX_MS = 2500; // older than this (clip time, or real time for a camera) = not drawn on the video
 let fallbackCursor = 0;
 const results = new Map<string, Frame>();
+const blockedNow = new Set<string>(); // slots whose last look had someone in front: shown as "ถูกบัง", their timers are paused
 type Method = "full" | "legacy";
 const comparison: Record<Method, { calls: number[]; detectMs: number[]; cycleMs: number[] }> = {
   full: { calls: [], detectMs: [], cycleMs: [] }, legacy: { calls: [], detectMs: [], cycleMs: [] },
@@ -73,7 +74,7 @@ const assertCurrent = (f: Frame) => { if (f.epoch !== epoch) throw cancelled; };
 const captureCanvas = document.createElement("canvas");
 const snapshotCanvas = $<HTMLCanvasElement>("watchSnapshot");
 function resetTimers() {
-  tracks.clear(); thumbs.clear(); results.clear(); watchRound = 0;
+  tracks.clear(); thumbs.clear(); results.clear(); blockedNow.clear(); watchRound = 0;
   fallbackCursor = 0;
   ui.latency.textContent = $("watchRoundLatency").textContent = $("watchResultDelay").textContent = $("watchResultAge").textContent = $("watchTimelineGap").textContent = $("watchCallsRound").textContent = "–";
   ui.log.replaceChildren(Object.assign(document.createElement("li"), { className: "muted placeholder", textContent: "ยังไม่มีการแจ้งเตือน" }));
@@ -187,9 +188,9 @@ function saveSlots() {
   try { localStorage.setItem(SLOTS_KEY, JSON.stringify(slots)); } catch { /* private mode */ }
 }
 
-type DisplayStatus = Track["status"] | "unknown" | "stale" | "away";
+type DisplayStatus = Track["status"] | "unknown" | "stale" | "away" | "blocked";
 // Kept short for the screen: no result yet and an old result both read "รอตรวจ" (they are told apart by colour only).
-const STATUS_LABEL: Record<DisplayStatus, string> = { ...STATUS_TH, unknown: "รอตรวจ", stale: "รอตรวจ", away: "นอกภาพ" };
+const STATUS_LABEL: Record<DisplayStatus, string> = { ...STATUS_TH, unknown: "รอตรวจ", stale: "รอตรวจ", away: "นอกภาพ", blocked: "ถูกบัง" };
 function statusLabel(s: Slot, status: DisplayStatus): string {
   if (status !== "checking") return STATUS_LABEL[status];
   const since = tracks.get(s.id)?.emptySince ?? null;
@@ -197,10 +198,11 @@ function statusLabel(s: Slot, status: DisplayStatus): string {
 }
 function displayStatus(s: Slot): DisplayStatus {
   if (isAway(s)) return "away";
-  const result = results.get(s.id);
-  if (!result) return "unknown";
   const status = tracks.get(s.id)?.status ?? "unknown";
   if (status === "out") return "out"; // a raised alert stays up until the slot is seen filled again
+  if (blockedNow.has(s.id)) return "blocked"; // says why the slot is not counting, instead of an old result going stale
+  const result = results.get(s.id);
+  if (!result) return "unknown";
   if (evidenceAge(result, isVideoFile(), now(), performance.now(), staleMs()).stale) return "stale";
   return status;
 }
@@ -209,7 +211,7 @@ const staleMs = () => Math.max(5000, Number(ui.hold.value) * 1000);
 
 // ---------------------------------------------------------------- draw
 
-const COLOR = { waiting: "#9aa1ad", stocked: "#2fa45a", checking: "#e0a100", out: "#e03b3b", unknown: "#9aa1ad", stale: "#8992a2", away: "#9aa1ad" };
+const COLOR = { waiting: "#9aa1ad", stocked: "#2fa45a", checking: "#e0a100", out: "#e03b3b", unknown: "#9aa1ad", stale: "#8992a2", away: "#9aa1ad", blocked: "#8992a2" };
 
 /** How far the last finished answer is behind the picture on screen (ms), or null when it is too old to draw. */
 function liveLag(f: Frame): number | null {
@@ -557,7 +559,7 @@ function slotMotion(frame: ImageBitmap, s: Slot): SlotMotion {
 function recordSlot(s: Slot, has: boolean, blocked: boolean, cfg: { holdMs: number; clearMs: number; maxObservationGapMs: number }, f: Frame) {
   const { track, event } = stepTrack(tracks.get(s.id) ?? newTrack(), has, blocked, f.time, cfg);
   tracks.set(s.id, track);
-  if (!blocked) results.set(s.id, f);
+  if (blocked) blockedNow.add(s.id); else { blockedNow.delete(s.id); results.set(s.id, f); }
   if (event) logEvent(s, event, f);
   return { track, event };
 }

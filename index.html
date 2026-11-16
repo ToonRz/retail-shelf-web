@@ -137,7 +137,7 @@
     .slot-stocked { color: #2fa45a; font-weight: 600; }
     .slot-checking { color: #b98500; font-weight: 600; }
     .slot-out { color: var(--bad); font-weight: 700; }
-    .slot-unknown, .slot-stale, .slot-away { color: var(--muted); }
+    .slot-unknown, .slot-stale, .slot-away, .slot-blocked { color: var(--muted); }
     .link { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; }
     .link:disabled { opacity: .5; cursor: not-allowed; }
     .alert-log { margin: 0; padding: 8px 16px; list-style: none; font-size: 13px; }
@@ -535,7 +535,7 @@
           ช่องที่ยังไม่มีผลยืนยันหรือผลเก่าแล้วแสดงว่า "รอตรวจ" ไม่ถือว่าเป็นช่องว่าง
           ปุ่ม "หาช่องอัตโนมัติ" ใช้ทั้งสอง model กับภาพเต็มหนึ่งครั้ง (กล่องที่ model 110 คลาสไม่รู้จักจะถูก crop มาระบุชื่ออีกรอบ)
           แล้วรวมสินค้าชนิดเดียวกันที่วางติดกันในแถวเดียวกันเป็นหนึ่งช่อง (ไม่เกิน 6 ชิ้นต่อช่อง) จึงควรกดตอนชั้นเต็ม ถ้าช่องว่างนานเกินเวลาที่ตั้งจะแจ้งเตือนว่าของหมด
-          ช่วงที่มีคนบังช่อง (ภาพเปลี่ยนมาก) จะหยุดนับเวลา</p>
+          ช่วงที่มีคนบังช่อง (ภาพเปลี่ยนมาก) จะหยุดนับเวลาและแสดงว่า "ถูกบัง"</p>
         <p class="muted" id="aboutAgent"></p>
       </div>
     </section>
