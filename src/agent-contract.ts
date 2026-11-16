@@ -30,7 +30,11 @@ export interface DetectResult {
 export type DetectInput = ImageBitmap | ImageData | HTMLImageElement | HTMLCanvasElement;
 
 export interface Agent {
-  manifest: { version: string; model: { name: string; classes: number; dataset: string } };
+  manifest: {
+    version: string;
+    model: { name: string; classes: number; dataset: string; sha256?: string };
+    shelfModel?: { name: string; classes: number; dataset: string; sha256?: string };
+  };
   backend: Backend;
   detect(image: DetectInput, opts?: DetectOptions): Promise<DetectResult>;
   dispose(): Promise<void>;

@@ -133,6 +133,41 @@
     .watch-alerts label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
     #pageWatch .list { flex: 0 1 auto; }
     #pageWatch .alert-log { flex: 1; min-height: 80px; overflow: auto; border-top: 1px solid var(--line); }
+    .watch-flow { border-top: 1px solid var(--line); background: var(--panel); }
+    .watch-flow > summary { display: flex; align-items: center; gap: 10px; padding: 11px 16px; font-size: 13px; font-weight: 650; }
+    .watch-flow > summary::marker { color: var(--muted); }
+    .flow-state { margin-left: auto; color: var(--muted); font-size: 11px; font-weight: 500; }
+    .flow-state.busy { color: var(--accent); }
+    .flow-state.error { color: var(--bad); }
+    .watch-flow-body { padding: 0 16px 12px; }
+    .watch-flow-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 3px 12px; margin: 0 0 8px; color: var(--muted); font-size: 11px; }
+    .watch-flow-decision { margin: 0 0 8px; padding: 6px 8px; border-left: 2px solid var(--accent); background: var(--chip); font-size: 11px; overflow-wrap: anywhere; }
+    .watch-flow-models { display: grid; gap: 6px; }
+    .flow-model { min-width: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); }
+    .flow-model.active { border-color: var(--accent); box-shadow: inset 2px 0 var(--accent); }
+    .flow-model-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+    .flow-model-head strong { min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+    .flow-model-role { color: var(--muted); font-size: 10px; text-align: right; }
+    .flow-model-meta { margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .flow-model-hash { margin-top: 3px; }
+    .flow-model-hash summary { color: var(--muted); font-size: 10px; }
+    .flow-model-hash code { display: block; margin-top: 3px; font: 10px/1.4 ui-monospace, monospace; overflow-wrap: anywhere; }
+    .watch-flow-subhead { display: flex; justify-content: space-between; gap: 8px; margin: 12px 0 5px; font-size: 11px; font-weight: 650; }
+    .watch-flow-subhead span { color: var(--muted); font-weight: 400; }
+    .watch-flow-events { display: grid; gap: 6px; max-height: 300px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+    .flow-event { min-width: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; font-size: 11px; }
+    .flow-event.pending { border-color: var(--accent); }
+    .flow-event.failed { border-color: var(--bad); }
+    .flow-event-head { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 10px; }
+    .flow-event-head strong { color: var(--accent); font-weight: 650; }
+    .flow-event.failed .flow-event-head strong { color: var(--bad); }
+    .flow-event-title { margin-top: 2px; font-weight: 650; overflow-wrap: anywhere; }
+    .flow-event-call, .flow-event-result, .flow-event-hash { margin-top: 2px; color: var(--muted); overflow-wrap: anywhere; }
+    .flow-event-call code, .flow-event-result code { color: var(--ink); font: 10px/1.4 ui-monospace, monospace; }
+    .flow-event-hash { font: 9px/1.4 ui-monospace, monospace; }
+    .flow-payload { margin-top: 5px; }
+    .flow-payload summary { color: var(--muted); font-size: 10px; }
+    .flow-payload pre { max-height: 150px; margin: 4px 0 0; padding: 6px; overflow: auto; background: var(--code); border-radius: 4px; font: 9px/1.45 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
     /* about: headings in their own track, content beside them */
     .doc { max-width: 1040px; margin: 0 auto; padding: 8px 16px 40px; }
@@ -295,6 +330,26 @@
         </table>
       </div>
       <ul class="alert-log" id="watchLog"><li class="muted placeholder">ยังไม่มีการแจ้งเตือน</li></ul>
+      <details class="watch-flow" id="watchFlow" open>
+        <summary>
+          <span>Flow ข้อมูลระหว่างเว็บกับ agent</span>
+          <span class="flow-state" id="watchFlowState">รอโหลด agent</span>
+        </summary>
+        <div class="watch-flow-body">
+          <div class="watch-flow-meta">
+            <span id="watchFlowRelease">agent — · backend —</span>
+            <span>ประมวลผลใน browser นี้</span>
+          </div>
+          <div class="watch-flow-decision" id="watchFlowDecision">เว็บจะอัปเดตสถานะหลังรับผลจาก agent</div>
+          <div class="watch-flow-models" id="watchFlowModels">
+            <p class="muted">ข้อมูล model จะแสดงหลังโหลด agent</p>
+          </div>
+          <div class="watch-flow-subhead"><span>คำขอและผลล่าสุด</span><span id="watchFlowRound">รอบ —</span></div>
+          <ol class="watch-flow-events" id="watchFlowEvents" aria-live="off">
+            <li class="muted">รอส่งภาพให้ agent</li>
+          </ol>
+        </div>
+      </details>
       <div class="watch-alerts">
         <label title="กล้องซูมหรือเลื่อน: ทุกรอบหาสินค้าทั้งภาพแล้วขยับกรอบทุกช่องตาม"><input id="watchFollow" type="checkbox" checked> กรอบตามภาพเมื่อซูม / เลื่อน</label>
         <label><input id="watchSound" type="checkbox" checked> เสียงเตือน</label>
