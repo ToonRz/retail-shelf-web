@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Box } from "../src/agent-contract";
-import { autoSlots, cropLabel, clipRect, cropRect, dragToRect, composeView, endMessage, fitView, fitViews, frameMotion, type Gray, pinView, IDENTITY, refineView, mapRect, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME } from "../src/ui/watch-logic";
+import { autoSlots, cropLabel, clipRect, cropRect, dragToRect, composeView, endMessage, evidenceAge, fallbackCursorAfter, fitView, fitViews, frameMotion, type Gray, pinView, IDENTITY, refineView, mapRect, matchFrameBoxes, nextFallbackSlots, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME, type Slot } from "../src/ui/watch-logic";
 
 const cfg = { holdMs: 10_000, clearMs: 3_000 };
 const box = (x1: number, y1: number, x2: number, y2: number): Box => ({ cls: "product", classId: 0, conf: 0.9, xyxy: [x1, y1, x2, y2] });
@@ -36,6 +36,26 @@ describe("stepTrack", () => {
   it("alerts for a slot that is empty from the start", () => {
     expect(run([[0, false], [10_000, false]]).events).toEqual([[10_000, "out"]]);
   });
+  it("restarts its dwell timer after a gap with no observation", () => {
+    const cfgWithGap = { ...cfg, maxObservationGapMs: 5_000 };
+    let t = newTrack();
+    t = stepTrack(t, false, false, 0, cfgWithGap).track;
+    t = stepTrack(t, false, false, 4_000, cfgWithGap).track;
+    const afterGap = stepTrack(t, false, false, 12_000, cfgWithGap);
+    expect(afterGap.event).toBeNull();
+    expect(afterGap.track.emptySince).toBe(12_000);
+    const later = stepTrack(afterGap.track, false, false, 16_000, cfgWithGap).track;
+    const closer = stepTrack(later, false, false, 20_000, cfgWithGap).track;
+    expect(stepTrack(closer, false, false, 21_999, cfgWithGap).event).toBeNull();
+    expect(stepTrack(closer, false, false, 22_000, cfgWithGap).event).toBe("out");
+  });
+  it("does not preserve a stale out alert across a long unobserved gap", () => {
+    const staleOut = { status: "out" as const, emptySince: 0, filledSince: null, lastAt: 0 };
+    const next = stepTrack(staleOut, false, false, 6_000, { ...cfg, maxObservationGapMs: 5_000 });
+    expect(next.track.status).toBe("checking");
+    expect(next.track.emptySince).toBe(6_000);
+    expect(next.event).toBeNull();
+  });
   it("clears a raised alert only after the slot stays filled", () => {
     const out = run([[0, false], [10_000, false]]).track;
     expect(run([[20_000, true], [21_000, false], [22_000, true], [24_999, true]], out).events).toEqual([]);
@@ -51,6 +71,72 @@ describe("slotHasProduct", () => {
     expect(slotHasProduct([box(40, 40, 50, 50)], 100, 100)).toBe(false);
     expect(slotHasProduct([box(92, 10, 100, 90)], 100, 100)).toBe(false);
     expect(slotHasProduct([], 100, 100)).toBe(false);
+  });
+});
+
+describe("full-frame slot matching", () => {
+  const slots: Slot[] = [
+    { id: "left", name: "left", rect: [0, 0, 0.5, 1] },
+    { id: "right", name: "right", rect: [0.5, 0, 0.5, 1] },
+  ];
+
+  it("matches a tiny box by position without applying crop-area thresholds", () => {
+    const result = matchFrameBoxes([box(20, 40, 25, 45)], slots, 100, 100);
+    expect([...result.matched]).toEqual(["left"]);
+    expect(result.uncertain.size).toBe(0);
+  });
+
+  it("marks a box straddling adjacent slots as uncertain", () => {
+    const result = matchFrameBoxes([box(45, 20, 55, 80)], slots, 100, 100);
+    expect(result.matched.size).toBe(0);
+    expect([...result.uncertain].sort()).toEqual(["left", "right"]);
+  });
+
+  it("maps tracked slot geometry before assigning full-frame boxes", () => {
+    const view = { s: 1.5, tx: -0.35, ty: -0.1 };
+    const result = matchFrameBoxes([box(10, 30, 30, 60)], slots, 100, 100, view);
+    expect([...result.matched]).toEqual(["left"]);
+    const right = matchFrameBoxes([box(70, 30, 90, 60)], slots, 100, 100, view);
+    expect([...right.matched]).toEqual(["right"]);
+  });
+
+  it("rotates a limited crop budget so every uncertain slot gets a turn", () => {
+    const uncertain = new Set(slots.concat(
+      ["2", "3", "4"].map((id) => ({ id, name: id, rect: [0, 0, 1, 1] as [number, number, number, number] })),
+    ).map((s) => s.id));
+    const all = [
+      nextFallbackSlots([...slots, ...["2", "3", "4"].map((id) => ({ id, name: id, rect: [0, 0, 1, 1] as [number, number, number, number] }))], uncertain, 0, 2),
+      nextFallbackSlots([...slots, ...["2", "3", "4"].map((id) => ({ id, name: id, rect: [0, 0, 1, 1] as [number, number, number, number] }))], uncertain, 2, 2),
+      nextFallbackSlots([...slots, ...["2", "3", "4"].map((id) => ({ id, name: id, rect: [0, 0, 1, 1] as [number, number, number, number] }))], uncertain, 4, 2),
+    ].flatMap((batch) => batch.slots.map((s) => s.id));
+    expect(new Set(all)).toEqual(uncertain);
+  });
+
+  it("advances only past completed fallback crops when the time budget cuts a batch short", () => {
+    const five = [...slots, ...["2", "3", "4"].map((id) => ({ id, name: id, rect: [0, 0, 1, 1] as [number, number, number, number] }))];
+    const uncertain = new Set(five.map((s) => s.id));
+    let cursor = 0;
+    const visited: string[] = [];
+    for (let i = 0; i < five.length; i++) {
+      const batch = nextFallbackSlots(five, uncertain, cursor, 2);
+      visited.push(batch.slots[0].id); // only the first crop fit this round's time budget
+      cursor = fallbackCursorAfter(five, [batch.slots[0]], cursor);
+    }
+    expect(new Set(visited)).toEqual(uncertain);
+  });
+});
+
+describe("evidence age", () => {
+  const frame = { time: 10_000, captured: 1_000 };
+  it("keeps real age separate from a paused video timeline", () => {
+    expect(evidenceAge(frame, true, 10_000, 4_000)).toEqual({ realtimeMs: 3_000, timelineMs: 0, stale: false });
+    expect(evidenceAge(frame, true, 10_000, 7_000).stale).toBe(true);
+  });
+  it("marks a fast-moving timeline stale even when little real time has passed", () => {
+    expect(evidenceAge(frame, true, 16_000, 1_500)).toEqual({ realtimeMs: 500, timelineMs: 6_000, stale: true });
+  });
+  it("uses monotonic age for camera frames", () => {
+    expect(evidenceAge(frame, false, 90_000, 7_000)).toEqual({ realtimeMs: 6_000, timelineMs: null, stale: true });
   });
 });
 

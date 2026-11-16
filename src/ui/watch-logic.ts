@@ -6,7 +6,7 @@ export interface Slot { id: string; name: string; rect: Rect }
 
 export type SlotStatus = "waiting" | "stocked" | "checking" | "out";
 export interface Track { status: SlotStatus; emptySince: number | null; filledSince: number | null; lastAt: number | null }
-export interface WatchConfig { holdMs: number; clearMs: number }
+export interface WatchConfig { holdMs: number; clearMs: number; maxObservationGapMs?: number }
 export type SlotEvent = "out" | "restocked" | null;
 
 export const newTrack = (): Track => ({ status: "waiting", emptySince: null, filledSince: null, lastAt: null });
@@ -17,18 +17,22 @@ export const newTrack = (): Track => ({ status: "waiting", emptySince: null, fil
  * nothing about the stock, so it keeps the status and pauses both timers.
  */
 export function stepTrack(t: Track, hasProduct: boolean, blocked: boolean, now: number, cfg: WatchConfig): { track: Track; event: SlotEvent } {
+  const gap = t.lastAt === null ? 0 : now - t.lastAt;
+  const previous = cfg.maxObservationGapMs !== undefined && gap > cfg.maxObservationGapMs
+    ? { ...t, status: "waiting" as const, emptySince: null, filledSince: null }
+    : t;
   if (blocked) {
-    const dt = t.lastAt === null ? 0 : now - t.lastAt;
-    return { track: { ...t, lastAt: now, emptySince: t.emptySince === null ? null : t.emptySince + dt, filledSince: t.filledSince === null ? null : t.filledSince + dt }, event: null };
+    const dt = previous.lastAt === null || gap > (cfg.maxObservationGapMs ?? Infinity) ? 0 : gap;
+    return { track: { ...previous, lastAt: now, emptySince: previous.emptySince === null ? null : previous.emptySince + dt, filledSince: previous.filledSince === null ? null : previous.filledSince + dt }, event: null };
   }
   if (hasProduct) {
-    if (t.status !== "out") return { track: { status: "stocked", emptySince: null, filledSince: null, lastAt: now }, event: null };
-    const filledSince = t.filledSince ?? now;
+    if (previous.status !== "out") return { track: { status: "stocked", emptySince: null, filledSince: null, lastAt: now }, event: null };
+    const filledSince = previous.filledSince ?? now;
     if (now - filledSince >= cfg.clearMs) return { track: { status: "stocked", emptySince: null, filledSince: null, lastAt: now }, event: "restocked" };
-    return { track: { ...t, emptySince: null, filledSince, lastAt: now }, event: null };
+    return { track: { ...previous, emptySince: null, filledSince, lastAt: now }, event: null };
   }
-  if (t.status === "out") return { track: { ...t, filledSince: null, lastAt: now }, event: null };
-  const emptySince = t.emptySince ?? now;
+  if (previous.status === "out") return { track: { ...previous, filledSince: null, lastAt: now }, event: null };
+  const emptySince = previous.emptySince ?? now;
   if (now - emptySince >= cfg.holdMs) return { track: { status: "out", emptySince, filledSince: null, lastAt: now }, event: "out" };
   return { track: { status: "checking", emptySince, filledSince: null, lastAt: now }, event: null };
 }
@@ -219,6 +223,67 @@ export type NBox = [number, number, number, number]; // x1, y1, x2, y2 as fracti
 
 export const mapRect = ([x, y, w, h]: Rect, v: View): Rect => [v.s * x + v.tx, v.s * y + v.ty, v.s * w, v.s * h];
 export const unmapRect = ([x, y, w, h]: Rect, v: View): Rect => [(x - v.tx) / v.s, (y - v.ty) / v.s, w / v.s, h / v.s];
+
+export interface FrameSlotMatches { matched: Set<string>; uncertain: Set<string> }
+
+/** Match original-frame model boxes to tracked slot rectangles without reusing crop-area thresholds. */
+export function matchFrameBoxes(boxes: Box[], slots: Slot[], width: number, height: number, view: View = IDENTITY): FrameSlotMatches {
+  const matched = new Set<string>(), uncertain = new Set<string>();
+  for (const box of boxes) {
+    const [x1, y1, x2, y2] = box.xyxy.map((v, i) => v / (i % 2 === 0 ? width : height)) as NBox;
+    const boxArea = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+    if (!boxArea) continue;
+    const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+    const candidates = slots.flatMap((slot) => {
+      const [sx, sy, sw, sh] = mapRect(slot.rect, view);
+      const ix = Math.max(0, Math.min(x2, sx + sw) - Math.max(x1, sx));
+      const iy = Math.max(0, Math.min(y2, sy + sh) - Math.max(y1, sy));
+      const coverage = (ix * iy) / boxArea;
+      const center = cx >= sx && cx <= sx + sw && cy >= sy && cy <= sy + sh;
+      return coverage > 0 || center ? [{ id: slot.id, coverage, center }] : [];
+    }).sort((a, b) => b.coverage - a.coverage);
+    if (!candidates.length) continue;
+    const centered = candidates.filter((c) => c.center);
+    const top = candidates[0], next = candidates[1];
+    if (centered.length === 1) {
+      const center = centered[0];
+      const otherCoverage = Math.max(0, ...candidates.filter((c) => c.id !== center.id).map((c) => c.coverage));
+      if (center.coverage - otherCoverage >= 0.1 || otherCoverage < 0.2) matched.add(center.id);
+      else for (const c of candidates) if (c.coverage >= 0.1) uncertain.add(c.id);
+    } else if (top.coverage >= 0.5 && (!next || top.coverage - next.coverage >= 0.15)) matched.add(top.id);
+    else {
+      for (const c of candidates) if (c.coverage >= 0.1) uncertain.add(c.id);
+    }
+  }
+  for (const id of matched) uncertain.delete(id);
+  return { matched, uncertain };
+}
+
+/** Pick uncertain slots in a rotating order so a fixed per-round crop budget cannot starve later slots. */
+export function nextFallbackSlots(slots: Slot[], uncertain: Set<string>, cursor: number, limit: number): { slots: Slot[]; cursor: number } {
+  if (!slots.length || limit <= 0) return { slots: [], cursor: 0 };
+  const start = ((cursor % slots.length) + slots.length) % slots.length;
+  const picked: Slot[] = [];
+  let i = start;
+  for (let scanned = 0; scanned < slots.length && picked.length < limit; scanned++, i = (i + 1) % slots.length) {
+    if (uncertain.has(slots[i].id)) picked.push(slots[i]);
+  }
+  return { slots: picked, cursor: i };
+}
+
+/** Advance only past crops that actually completed; a time-budget skip must not starve later slots. */
+export function fallbackCursorAfter(slots: Slot[], processed: Slot[], cursor: number): number {
+  if (!slots.length) return 0;
+  if (!processed.length) return ((cursor % slots.length) + slots.length) % slots.length;
+  return (slots.indexOf(processed[processed.length - 1]) + 1) % slots.length;
+}
+
+export function evidenceAge(frame: { time: number; captured: number }, video: boolean, mediaNow: number, monotonicNow: number) {
+  const realtimeMs = Math.max(0, monotonicNow - frame.captured);
+  const timelineMs = video ? Math.max(0, mediaNow - frame.time) : null;
+  return { realtimeMs, timelineMs, stale: realtimeMs > 5000 || (timelineMs !== null && timelineMs > 5000) };
+}
+
 const mapBox = ([x1, y1, x2, y2]: NBox, v: View): NBox => [v.s * x1 + v.tx, v.s * y1 + v.ty, v.s * x2 + v.tx, v.s * y2 + v.ty];
 
 /** Share of a rect that is inside the frame (0 when it is all outside). */

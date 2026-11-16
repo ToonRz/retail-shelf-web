@@ -2,17 +2,21 @@
 // then get an alert when a slot stays empty. A picture or video file finds its slots as soon as it is opened.
 // Each slot is cropped from the camera, a video file or a still picture and checked for any product box with the 1-class shelf model only (shelfOnly).
 import type { Agent, Backend, DetectOptions, DetectResult } from "./agent-contract";
-import { FlowView, type FlowStep, type HoldKind } from "./flow";
+import { FlowView, type FlowStep } from "./flow";
 import { confirmVerdict, followVerdict, foundVerdict, nameVerdict, roundVerdict, slotVerdict, topNameConf } from "./ui/flow-logic";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
-import { autoSlots, clipRect, composeView, relView, cropLabel, endMessage, fitViews, frameMotion, MIN_SHARP, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
+import { autoSlots, clipRect, composeView, relView, cropLabel, endMessage, evidenceAge, fallbackCursorAfter, fitViews, frameMotion, MIN_SHARP, nextFallbackSlots, matchFrameBoxes, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
 
 const INTERVAL_MS = 1000;
+const MAX_FALLBACKS_PER_ROUND = 2;
+const FALLBACK_BUDGET_MS = 900;
+const MAX_OBSERVATION_GAP_MS = 5000;
 const CLEAR_MS = 3000;
 const MOTION_BLOCKED = 14; // mean gray change between checks (0-255) that means someone is in front of the slot
 const THUMB = 32;
 const SLOTS_KEY = "watchSlots";
+const METHOD_KEY = "watchDetectionMethod";
 const NAME_CONF = 0.5;  // a name from a crop below this is more often wrong than right: keep "สินค้าอื่น" instead
 const MAX_NAME_CROPS = 60; // products named one by one on a crop (~0.3-0.7 s each on WASM)
 const NAME_PADS = [0.15, 0.4]; // crop around a product box, grown by this much of its size on each side
@@ -28,7 +32,7 @@ const ui = {
   hold: $<HTMLInputElement>("watchHold"), holdVal: $("watchHoldVal"), conf: $<HTMLInputElement>("watchConf"), confVal: $("watchConfVal"),
   banner: $("watchBanner"), outCount: $("watchOutCount"), latency: $("watchLatency"), slots: $("watchSlots"), log: $("watchLog"),
   notifyBtn: $<HTMLButtonElement>("watchNotifyBtn"), sound: $<HTMLInputElement>("watchSound"), follow: $<HTMLInputElement>("watchFollow"), status: $("watchStatus"),
-  progress: $<HTMLProgressElement>("watchProgress"), pill: $("watchPill"), backend: $<HTMLSelectElement>("backend"),
+  progress: $<HTMLProgressElement>("watchProgress"), pill: $("watchPill"), backend: $<HTMLSelectElement>("backend"), method: $<HTMLSelectElement>("watchMethod"),
 };
 
 let agent: Agent | null = null;
@@ -45,18 +49,44 @@ let watchRound = 0;
 let epoch = 0, sourceEpoch = 0, busy = false, wantsPlay = false;
 let sourceLoad = new AbortController();
 const cancelled = new Error("obsolete frame");
-type Frame = { id: number; epoch: number; time: number; captured: number; detectMs: number; presenting: boolean };
+type Frame = { id: number; epoch: number; time: number; captured: number; detectMs: number; detectCalls: number; cycleMs: number; resultAt: number | null; resultDelayMs: number | null };
 let frameSerial = 0;
 let active: Frame | null = null;
 let snapshot: Frame | null = null;
+let snapshotBoxes: DetectResult["boxes"] = [];
+let fallbackCursor = 0;
 const results = new Map<string, Frame>();
+type Method = "full" | "legacy";
+const comparison: Record<Method, { calls: number[]; detectMs: number[]; cycleMs: number[] }> = {
+  full: { calls: [], detectMs: [], cycleMs: [] }, legacy: { calls: [], detectMs: [], cycleMs: [] },
+};
 const assertCurrent = (f: Frame) => { if (f.epoch !== epoch) throw cancelled; };
 const captureCanvas = document.createElement("canvas");
 const snapshotCanvas = $<HTMLCanvasElement>("watchSnapshot");
 function resetTimers() {
   tracks.clear(); thumbs.clear(); results.clear(); watchRound = 0;
-  ui.latency.textContent = $("watchRoundLatency").textContent = "–";
+  fallbackCursor = 0;
+  ui.latency.textContent = $("watchRoundLatency").textContent = $("watchResultDelay").textContent = $("watchResultAge").textContent = $("watchTimelineGap").textContent = $("watchCallsRound").textContent = "–";
   ui.log.replaceChildren(Object.assign(document.createElement("li"), { className: "muted placeholder", textContent: "ยังไม่มีการแจ้งเตือน" }));
+}
+function resetComparison() {
+  for (const values of Object.values(comparison)) { values.calls.length = 0; values.detectMs.length = 0; values.cycleMs.length = 0; }
+  renderComparison();
+}
+function renderComparison() {
+  const summarize = (values: number[]) => {
+    if (!values.length) return "ยังไม่มีรอบ";
+    const sorted = [...values].sort((a, b) => a - b);
+    const avg = values.reduce((a, b) => a + b, 0) / values.length;
+    const p95 = sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)];
+    return `เฉลี่ย ${avg.toFixed(0)} / p95 ${p95.toFixed(0)}`;
+  };
+  const line = (title: string, method: Method) => {
+    const values = comparison[method];
+    const avgCalls = values.calls.length ? values.calls.reduce((a, b) => a + b, 0) / values.calls.length : 0;
+    return `${title}: ${values.calls.length} รอบ · ${avgCalls.toFixed(1)} calls/รอบ · detect ${summarize(values.detectMs)} ms · รอบ ${summarize(values.cycleMs)} ms`;
+  };
+  $("watchComparison").textContent = `${line("ภาพเต็ม", "full")}\n${line("วิธีเดิม", "legacy")}`;
 }
 function invalidate(keepSnapshot = false) {
   epoch++; active = null;
@@ -66,12 +96,15 @@ function invalidate(keepSnapshot = false) {
 function capture(): { context: Frame; bitmap: Promise<ImageBitmap> } {
   const [width, height] = frameSize();
   captureCanvas.width = width; captureCanvas.height = height;
-  const context = { id: ++frameSerial, epoch, time: now(), captured: performance.now(), detectMs: 0, presenting: !stream && flow.slow };
+  const context = { id: ++frameSerial, epoch, time: now(), captured: performance.now(), detectMs: 0, detectCalls: 0, cycleMs: 0, resultAt: null, resultDelayMs: null };
   // Copy pixels synchronously with the timestamp; decoding the bitmap may yield.
   captureCanvas.getContext("2d")!.drawImage(media(), 0, 0, width, height);
   snapshotCanvas.width = width; snapshotCanvas.height = height;
   snapshotCanvas.getContext("2d")!.drawImage(captureCanvas, 0, 0);
   active = snapshot = context;
+  ui.latency.textContent = $("watchRoundLatency").textContent = "กำลังตรวจ";
+  $("watchCallsRound").textContent = "0";
+  snapshotBoxes = [];
   $("watchSnapshotBox").hidden = false;
   updateTimeline();
   drawOverlay();
@@ -108,9 +141,10 @@ const flow = new FlowView(onStage);
 async function detectShown(image: ImageBitmap, options: DetectOptions, step: FlowStep, f: Frame): Promise<DetectResult> {
   assertCurrent(f);
   flow.send(step, image, options);
-  await flow.nextPaint();
   try {
     assertCurrent(f);
+    f.detectCalls++;
+    $("watchCallsRound").textContent = String(f.detectCalls);
     const started = performance.now();
     const r = await agent!.detect(image, options);
     assertCurrent(f);
@@ -123,12 +157,10 @@ async function detectShown(image: ImageBitmap, options: DetectOptions, step: Flo
   }
 }
 
-/** Shows what the web made of an answer; in presenter mode it then stays on screen for a moment. */
-async function decide(v: Parameters<FlowView["decide"]>[0], kind: HoldKind, f: Frame) {
+/** Shows what the web made of an answer without delaying the next detection. */
+function decide(v: Parameters<FlowView["decide"]>[0], f: Frame) {
   assertCurrent(f);
   flow.decide(v);
-  if (f.presenting) await flow.hold(kind);
-  assertCurrent(f);
 }
 
 const media = () => (isImage ? ui.image : ui.video);
@@ -146,6 +178,16 @@ function saveSlots() {
   try { localStorage.setItem(SLOTS_KEY, JSON.stringify(slots)); } catch { /* private mode */ }
 }
 
+type DisplayStatus = Track["status"] | "unknown" | "stale" | "away";
+const STATUS_LABEL: Record<DisplayStatus, string> = { ...STATUS_TH, unknown: "ยังไม่ยืนยัน", stale: "ผลเก่า", away: "นอกภาพ" };
+function displayStatus(s: Slot): DisplayStatus {
+  if (isAway(s)) return "away";
+  const result = results.get(s.id);
+  if (!result) return "unknown";
+  if (evidenceAge(result, isVideoFile(), now(), performance.now()).stale) return "stale";
+  return tracks.get(s.id)?.status ?? "unknown";
+}
+
 // ---------------------------------------------------------------- draw
 
 function drawOverlay() {
@@ -158,10 +200,10 @@ function drawOverlay() {
   ctx.lineWidth = lw;
   ctx.font = `600 ${fs}px system-ui, sans-serif`;
   ctx.textBaseline = "top";
-  const COLOR = { waiting: "#9aa1ad", stocked: "#2fa45a", checking: "#e0a100", out: "#e03b3b" };
+  const COLOR = { waiting: "#9aa1ad", stocked: "#2fa45a", checking: "#e0a100", out: "#e03b3b", unknown: "#9aa1ad", stale: "#8992a2", away: "#9aa1ad" };
   for (const s of slots) {
     if (!isImage && (running || finding || (isVideoFile() && !ui.video.paused))) continue;
-    const rect = slotRect(s), status = isImage ? tracks.get(s.id)?.status ?? "waiting" : "waiting";
+    const rect = slotRect(s), status = isImage ? displayStatus(s) : "waiting";
     const away = isAway(s);
     const [x, y, w, h] = away ? clipRect(rect) : rect;
     if (w <= 0 || h <= 0) continue;
@@ -169,7 +211,7 @@ function drawOverlay() {
     if (away) ctx.setLineDash([lw * 3, lw * 2]);
     ctx.strokeRect(x * W, y * H, w * W, h * H);
     ctx.setLineDash([]);
-    const label = away ? `${s.name} · นอกภาพ` : status === "waiting" ? s.name : `${s.name} · ${STATUS_TH[status]}`;
+    const label = away ? `${s.name} · นอกภาพ` : status === "waiting" ? s.name : `${s.name} · ${STATUS_LABEL[status]}`;
     ctx.fillRect(x * W, y * H, ctx.measureText(label).width + 12, fs + 8);
     ctx.fillStyle = "#fff";
     ctx.fillText(label, x * W + 6, y * H + 4);
@@ -178,10 +220,23 @@ function drawOverlay() {
     const sc = snapshotCanvas.getContext("2d")!;
     sc.clearRect(0, 0, W, H); sc.drawImage(captureCanvas, 0, 0);
     sc.lineWidth = lw; sc.font = `600 ${fs}px system-ui`;
+    sc.textBaseline = "top";
+    for (const b of snapshotBoxes) {
+      const [x1, y1, x2, y2] = b.xyxy;
+      if (x2 <= x1 || y2 <= y1) continue;
+      sc.strokeStyle = "#3ccf7a";
+      sc.fillStyle = "#167443";
+      sc.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      const label = `${b.cls} ${b.conf.toFixed(2)}`;
+      sc.fillRect(x1, Math.max(0, y1 - fs - 8), sc.measureText(label).width + 10, fs + 8);
+      sc.fillStyle = "#fff";
+      sc.fillText(label, x1 + 5, Math.max(0, y1 - fs - 4));
+    }
     for (const s of slots) {
       const [x, y, w, h] = clipRect(slotRect(s));
       const result = results.get(s.id);
-      sc.strokeStyle = sc.fillStyle = COLOR[result?.id === snapshot.id ? tracks.get(s.id)?.status ?? "waiting" : "waiting"];
+      const status = result?.id === snapshot.id ? displayStatus(s) : "waiting";
+      sc.strokeStyle = sc.fillStyle = COLOR[status];
       sc.strokeRect(x * W, y * H, w * W, h * H); sc.fillText(s.name, x * W + 4, y * H + fs);
     }
   }
@@ -195,14 +250,14 @@ function renderSlots() {
   ui.slots.replaceChildren(...(slots.length ? slots.map((s) => {
     const tr = document.createElement("tr");
     const result = results.get(s.id);
-    if (result) { tr.dataset.frameId = String(result.id); tr.dataset.frameTime = String(result.time); tr.dataset.captured = String(result.captured); tr.title = `Frame #${result.id} · ${(result.time / 1000).toFixed(2)} s`; }
+    if (result) { tr.dataset.slotId = s.id; tr.dataset.frameId = String(result.id); tr.dataset.frameTime = String(result.time); tr.dataset.captured = String(result.captured); tr.title = `Frame #${result.id} · ${(result.time / 1000).toFixed(2)} s`; }
     const nameTd = document.createElement("td");
     const input = Object.assign(document.createElement("input"), { value: s.name, className: "slot-name", type: "text" });
     input.setAttribute("aria-label", "ชื่อสินค้าในช่องนี้");
     input.addEventListener("change", () => { s.name = input.value.trim() || s.name; input.value = s.name; saveSlots(); drawOverlay(); });
     nameTd.append(input);
-    const status = tracks.get(s.id)?.status ?? "waiting", away = isAway(s);
-    const st = Object.assign(document.createElement("td"), { textContent: away ? "นอกภาพ" : STATUS_TH[status], className: `slot-${away ? "waiting" : status}` });
+    const status = displayStatus(s);
+    const st = Object.assign(document.createElement("td"), { textContent: STATUS_LABEL[status], className: `slot-${status}` });
     if (result) st.append(Object.assign(document.createElement("small"), { className: "frame-stamp", textContent: `#${result.id} · ${(result.time / 1000).toFixed(2)} s` }));
     const del = document.createElement("td");
     del.className = "num";
@@ -213,7 +268,7 @@ function renderSlots() {
     tr.append(nameTd, st, del);
     return tr;
   }) : [Object.assign(document.createElement("tr"), { innerHTML: '<td colspan="3" class="muted">ยังไม่มีช่อง กดหาช่องอัตโนมัติตอนชั้นเต็ม หรือลากกรอบบนภาพรอบสินค้าแต่ละชนิด</td>' })]));
-  const out = slots.filter((s) => tracks.get(s.id)?.status === "out");
+  const out = slots.filter((s) => displayStatus(s) === "out");
   ui.outCount.textContent = String(out.length);
   ui.banner.hidden = out.length === 0;
   ui.banner.textContent = out.length ? `ของหมด: ${out.map((s) => s.name).join(", ")}` : "";
@@ -225,6 +280,7 @@ function updateControls() {
   ui.autoBtn.disabled = !agent || !hasFrame() || running || finding;
   ui.autoBtn.textContent = finding ? "กำลังหาช่อง…" : "หาช่องอัตโนมัติ";
   ui.clearBtn.disabled = running || finding || slots.length === 0;
+  ui.method.disabled = running || finding;
   ui.overlay.classList.toggle("drawable", !running && !finding);
   ui.stage.classList.toggle("busy", finding);
 }
@@ -272,10 +328,8 @@ async function findSlots(ask = true) {
   const jobEpoch = epoch;
   updateControls();
   renderSlots();
-  // A video file is held on the frame the slots come from: it would otherwise play on (stock being taken
-  // away, or the end of the file) while slots are found and checked, before watching has even started.
-  if (isVideoFile()) { wantsPlay = false; ui.video.pause(); updateTimeline(); }
   ui.progress.hidden = false;
+  let detectionFrame: Frame | null = null;
   const step = async (text: string, done: number, total: number) => {
     setStatus(text);
     ui.progress.max = total;
@@ -286,6 +340,7 @@ async function findSlots(ask = true) {
   let frame: ImageBitmap | null = null;
   try {
     const captured = capture(), f = captured.context;
+    detectionFrame = f;
     frame = await captured.bitmap;
     assertCurrent(f);
     flow.round(null);
@@ -294,8 +349,10 @@ async function findSlots(ask = true) {
     const classes = agent.manifest.model.classes;
     // no shelfOnly: names from the 110-class model + "product" boxes of the shelf model
     const r = await detectShown(frame, { conf }, { phase: "find", step: 0, title: "หาสินค้าทุกชิ้นในภาพ", target: "ภาพเต็ม", area: [0, 0, 1, 1], full: true }, f);
+    snapshotBoxes = r.boxes;
+    drawOverlay();
     const items = toFoundItems(r.boxes, classes, r.width, r.height);
-    await decide(foundVerdict(items.length), "full", f);
+    decide(foundVerdict(items.length), f);
     const toName = items.slice(0, MAX_NAME_CROPS);
     for (const [k, it] of toName.entries()) {
       await step(`กำลังระบุชื่อสินค้า ${k + 1} / ${toName.length}…`, k, toName.length);
@@ -306,7 +363,7 @@ async function findSlots(ask = true) {
           const area: Rect = [cr[0] / r.width, cr[1] / r.height, cr[2] / r.width, cr[3] / r.height];
           const c = await detectShown(crop, { conf: Math.max(conf, NAME_CONF) }, { phase: "find", step: 1, title: `ระบุชื่อสินค้า ชิ้นที่ ${k + 1} / ${toName.length}`, target: p ? "ครอปกว้างขึ้น" : "ครอปรอบสินค้า", area }, f);
           it.name = cropLabel(c.boxes, classes, c.width, c.height);
-          await decide(nameVerdict(it.name, topNameConf(c.boxes, classes), p === NAME_PADS.length - 1), "name", f);
+          decide(nameVerdict(it.name, topNameConf(c.boxes, classes), p === NAME_PADS.length - 1), f);
         } finally {
           crop.close();
         }
@@ -324,7 +381,7 @@ async function findSlots(ask = true) {
         const c = await detectShown(crop, { conf, shelfOnly: true }, { phase: "find", step: 2, title: `ยืนยันช่อง “${candidate.name}” (${k + 1} / ${candidates.length})`, target: "ครอปช่อง", area: candidate.rect }, f);
         const has = slotHasProduct(c.boxes, c.width, c.height);
         if (has) found.push(candidate);
-        await decide(confirmVerdict(has), "confirm", f);
+        decide(confirmVerdict(has), f);
       } finally {
         crop.close();
       }
@@ -340,7 +397,7 @@ async function findSlots(ask = true) {
     saveSlots();
     const named = items.filter((i) => i.name !== null).length;
     const dropped = candidates.length - found.length;
-    setStatus(`เจอ ${found.length} ช่อง จากสินค้า ${items.length} ชิ้น (รู้ชื่อ ${named} ชิ้น)${dropped ? ` · ตัด ${dropped} ช่องที่ตอนนี้ก็ดูว่างอยู่แล้ว` : ""} · ตรวจกรอบ แก้ชื่อ ลบ หรือลากเพิ่มได้ แล้วกดเริ่มเฝ้า${isVideoFile() ? " (วิดีโอหยุดรอที่ภาพนี้)" : ""}`);
+    setStatus(`เจอ ${found.length} ช่อง จากสินค้า ${items.length} ชิ้น (รู้ชื่อ ${named} ชิ้น)${dropped ? ` · ตัด ${dropped} ช่องที่ตอนนี้ก็ดูว่างอยู่แล้ว` : ""} · ตรวจกรอบ แก้ชื่อ ลบ หรือลากเพิ่มได้ แล้วกดเริ่มเฝ้า`);
     flow.idle(`ได้ ${found.length} ช่อง`, "พร้อมเฝ้า · กด “เริ่มเฝ้า”");
   } catch (e) {
     if (jobEpoch !== epoch) return;
@@ -349,12 +406,20 @@ async function findSlots(ask = true) {
   } finally {
     frame?.close();
     finding = busy = false;
-    active = null;
+    if (jobEpoch === epoch && detectionFrame) {
+      active = null;
+      detectionFrame.resultAt = performance.now();
+      detectionFrame.resultDelayMs = isVideoFile() ? Math.max(0, ui.video.currentTime * 1000 - detectionFrame.time) : null;
+      detectionFrame.cycleMs = detectionFrame.resultAt - detectionFrame.captured;
+      ui.latency.textContent = detectionFrame.detectMs.toFixed(0);
+      $("watchRoundLatency").textContent = detectionFrame.cycleMs.toFixed(0);
+      $("watchCallsRound").textContent = String(detectionFrame.detectCalls);
+    }
     ui.progress.hidden = true;
     renderSlots();
     drawOverlay();
+    updateTimeline();
     updateControls();
-    if (jobEpoch === epoch && wantsPlay && isVideoFile()) void playFile();
   }
 }
 
@@ -413,32 +478,40 @@ function cropSlot(src: HTMLVideoElement | HTMLImageElement | ImageBitmap, [x, y,
   return createImageBitmap(src, Math.round(x * W), Math.round(y * H), Math.max(1, Math.round(w * W)), Math.max(1, Math.round(h * H)));
 }
 
-async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdMs: number; clearMs: number }, k: number, f: Frame): Promise<number> {
-  const rect = slotRect(s);
-  if (isAway(s)) { // zoomed or panned away: says nothing about the stock, like a blocked slot
-    tracks.set(s.id, stepTrack(tracks.get(s.id) ?? newTrack(), false, true, f.time, cfg).track);
-    thumbs.delete(s.id);
-    results.set(s.id, f);
+type SlotMotion = { away: boolean; blocked: boolean };
+function slotMotion(frame: ImageBitmap, s: Slot): SlotMotion {
+  if (isAway(s)) { thumbs.delete(s.id); return { away: true, blocked: true }; }
+  const [x, y, w, h] = clipRect(slotRect(s));
+  if (w <= 0 || h <= 0) { thumbs.delete(s.id); return { away: true, blocked: true }; }
+  thumbCtx.drawImage(frame, x * frame.width, y * frame.height, w * frame.width, h * frame.height, 0, 0, THUMB, THUMB);
+  const gray = toGray(thumbCtx.getImageData(0, 0, THUMB, THUMB).data);
+  const prev = thumbs.get(s.id);
+  thumbs.set(s.id, gray);
+  return { away: false, blocked: prev !== undefined && motionScore(prev, gray) > MOTION_BLOCKED };
+}
+
+function recordSlot(s: Slot, has: boolean, blocked: boolean, cfg: { holdMs: number; clearMs: number; maxObservationGapMs: number }, f: Frame) {
+  const { track, event } = stepTrack(tracks.get(s.id) ?? newTrack(), has, blocked, f.time, cfg);
+  tracks.set(s.id, track);
+  if (!blocked) results.set(s.id, f);
+  if (event) logEvent(s, event, f);
+  return { track, event };
+}
+
+async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdMs: number; clearMs: number; maxObservationGapMs: number }, k: number, f: Frame, motion = slotMotion(frame, s)): Promise<number> {
+  const rect = clipRect(slotRect(s));
+  if (motion.away) {
+    recordSlot(s, false, true, cfg, f);
     return 0;
   }
-  const crop = await cropSlot(frame, clipRect(rect));
+  const crop = await cropSlot(frame, rect);
   try {
     assertCurrent(f);
-    thumbCtx.drawImage(crop, 0, 0, THUMB, THUMB);
-    const gray = toGray(thumbCtx.getImageData(0, 0, THUMB, THUMB).data);
-    const prev = thumbs.get(s.id);
-    thumbs.set(s.id, gray);
-    // only "is there a box" matters here: skip the 110-class model
-    const r = await detectShown(crop, { conf, shelfOnly: true }, { phase: "watch", step: 1, title: `ตรวจช่อง “${s.name}” (${k + 1} / ${slots.length})`, target: "ครอปช่อง", area: clipRect(rect) }, f);
+    // Only "is there a box" matters here: skip the 110-class model.
+    const r = await detectShown(crop, { conf, shelfOnly: true }, { phase: "watch", step: 1, title: `ยืนยันช่อง “${s.name}” (${k + 1} / ${slots.length})`, target: "ครอปช่องที่ยังไม่ชัด", area: rect }, f);
     const has = slotHasProduct(r.boxes, r.width, r.height);
-    const blocked = prev !== undefined && motionScore(prev, gray) > MOTION_BLOCKED;
-    const before = tracks.get(s.id)?.status;
-    const { track, event } = stepTrack(tracks.get(s.id) ?? newTrack(), has, blocked, f.time, cfg);
-    tracks.set(s.id, track);
-    results.set(s.id, f);
-    if (event) logEvent(s, event, f);
-    if (track.status !== before) { renderSlots(); drawOverlay(); } // the screen follows each answer, not only the end of the round
-    await decide(slotVerdict(track, has, blocked, event, f.time, cfg.holdMs), "slot", f);
+    const { track, event } = recordSlot(s, has, motion.blocked, cfg, f);
+    decide(slotVerdict(track, has, motion.blocked, event, f.time, cfg.holdMs), f);
     return r.latency_ms;
   } finally {
     crop.close();
@@ -453,8 +526,7 @@ async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdM
  * is unclear for a few rounds in a row is the reference searched alone: every view the product boxes allow
  * (fitViews), the pictures pick one (refineView).
  */
-async function followView(frame: ImageBitmap, conf: number, f: Frame): Promise<number> {
-  const r = await detectShown(frame, { conf, shelfOnly: true }, { phase: "watch", step: 0, title: "เช็กว่ากล้องขยับไหม", target: "ภาพเต็ม", area: [0, 0, 1, 1], full: true }, f);
+function followView(frame: ImageBitmap, r: DetectResult, f: Frame) {
   const before = view;
   const boxes = normBoxes(r.boxes, r.width, r.height);
   grayCtx.drawImage(frame, 0, 0, GRAY_W, GRAY_H);
@@ -466,7 +538,6 @@ async function followView(frame: ImageBitmap, conf: number, f: Frame): Promise<n
     // moves from the boxes of the last frame, and those implied by the reference (fitViews) given the current view
     const viaRef = fitViews(refBoxes, boxes, view).map((f) => relView(f.view, view));
     const mv = last ? frameMotion(last.gray, gray, last.boxes, boxes, viaRef) : null;
-    await breathe();
     assertCurrent(f);
     if (mv) {
       if (!mv.still) view = pinView(refGray, gray, composeView(mv.view, view));
@@ -478,8 +549,7 @@ async function followView(frame: ImageBitmap, conf: number, f: Frame): Promise<n
     }
   }
   setStatus(watchStatus());
-  await decide(followVerdict(r.boxes.length, view.s, view !== before, lost > 0), "follow", f);
-  return r.latency_ms;
+  decide(followVerdict(r.boxes.length, view.s, view !== before, lost > 0), f);
 }
 
 function watchStatus(): string {
@@ -493,34 +563,74 @@ async function loop() {
   try {
     while (running) {
       if (isVideoFile() && (ui.video.ended || !wantsPlay || ui.video.seeking)) break;
-      const held = isVideoFile() && flow.slow;
-      if (held) ui.video.pause();
-      const t0 = performance.now();
+      const cycleStarted = performance.now();
       const captured = capture(), f = captured.context;
+      const method: Method = ui.method.value === "legacy" ? "legacy" : "full";
       let frame: ImageBitmap | null = null;
       flow.round(++watchRound);
       try {
         frame = await captured.bitmap;
         assertCurrent(f);
-        const cfg = { holdMs: Number(ui.hold.value) * 1000, clearMs: CLEAR_MS };
+        const cfg = { holdMs: Number(ui.hold.value) * 1000, clearMs: CLEAR_MS, maxObservationGapMs: MAX_OBSERVATION_GAP_MS };
         const conf = Number(ui.conf.value);
-        if (ui.follow.checked) { await followView(frame, conf, f); assertCurrent(f); }
-        for (const [k, s] of slots.entries()) {
-          assertCurrent(f);
-          await checkSlot(frame, s, conf, cfg, k, f);
-          await breathe();
+        const fullFrame = method === "full" || ui.follow.checked
+          ? await detectShown(frame, { conf, shelfOnly: true }, { phase: "watch", step: 0, title: method === "full" ? "ตรวจภาพเต็มและตามตำแหน่งชั้น" : "เช็กว่ากล้องขยับไหม", target: "ภาพเต็ม · model ชั้นวาง", area: [0, 0, 1, 1], full: true }, f)
+          : null;
+        if (fullFrame) {
+          snapshotBoxes = fullFrame.boxes;
+          drawOverlay();
+          if (ui.follow.checked) followView(frame, fullFrame, f);
+        }
+        if (method === "full" && fullFrame) {
+          const matches = matchFrameBoxes(fullFrame.boxes, slots, fullFrame.width, fullFrame.height, view);
+          const uncertain = new Set(matches.uncertain);
+          const motion = new Map<string, SlotMotion>();
+          for (const s of slots) {
+            const state = slotMotion(frame, s);
+            motion.set(s.id, state);
+            if (state.away) { uncertain.delete(s.id); recordSlot(s, false, true, cfg, f); }
+            else if (matches.matched.has(s.id)) recordSlot(s, true, state.blocked, cfg, f);
+            else uncertain.add(s.id);
+          }
+          const batch = nextFallbackSlots(slots, uncertain, fallbackCursor, MAX_FALLBACKS_PER_ROUND);
+          const fallbackStarted = performance.now();
+          const processed: Slot[] = [];
+          for (const [k, s] of batch.slots.entries()) {
+            if (k > 0 && performance.now() - fallbackStarted >= FALLBACK_BUDGET_MS) break;
+            assertCurrent(f);
+            await checkSlot(frame, s, conf, cfg, slots.indexOf(s), f, motion.get(s.id));
+            processed.push(s);
+          }
+          fallbackCursor = fallbackCursorAfter(slots, processed, fallbackCursor);
+        } else {
+          for (const [k, s] of slots.entries()) {
+            assertCurrent(f);
+            await checkSlot(frame, s, conf, cfg, k, f);
+          }
         }
         assertCurrent(f);
         renderSlots(); drawOverlay();
-        flow.roundDone(roundVerdict(slots.filter((s) => !isAway(s)).map((s) => tracks.get(s.id)?.status ?? "waiting"), slots.filter(isAway).length));
-        if (f.presenting) await flow.hold("round");
+        const visible = slots.filter((s) => !isAway(s));
+        const statuses = visible.map((s) => {
+          const status = displayStatus(s);
+          return status === "stocked" || status === "checking" || status === "out" ? status : "waiting";
+        });
+        flow.roundDone(roundVerdict(statuses, slots.length - visible.length));
         assertCurrent(f);
-        active = null;
-        if (held && wantsPlay && running && !ui.video.ended) await ui.video.play();
-        await new Promise(r => setTimeout(r, INTERVAL_MS));
-        assertCurrent(f);
+        f.resultAt = performance.now();
+        f.resultDelayMs = isVideoFile() ? Math.max(0, ui.video.currentTime * 1000 - f.time) : null;
+        f.cycleMs = f.resultAt - f.captured;
         ui.latency.textContent = f.detectMs.toFixed(0);
-        $("watchRoundLatency").textContent = (performance.now() - t0).toFixed(0);
+        $("watchRoundLatency").textContent = f.cycleMs.toFixed(0);
+        $("watchCallsRound").textContent = String(f.detectCalls);
+        comparison[method].calls.push(f.detectCalls);
+        comparison[method].detectMs.push(f.detectMs);
+        comparison[method].cycleMs.push(f.cycleMs);
+        renderComparison();
+        updateTimeline();
+        active = null;
+        await new Promise(r => setTimeout(r, Math.max(0, INTERVAL_MS - (performance.now() - cycleStarted))));
+        assertCurrent(f);
       } catch (e) {
         if (f.epoch === epoch) stop(`ตรวจไม่สำเร็จ: ${errorMessage(e)}`, true);
         break;
@@ -579,11 +689,39 @@ function updateTimeline() {
   const fmt = (s: number) => Number.isFinite(s) ? `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, "0")}` : "–";
   $("watchTime").textContent = `${fmt(ui.video.currentTime)} / ${fmt(ui.video.duration)}`;
   $("watchPlay").textContent = wantsPlay ? "พัก" : "เล่น";
-  ui.slots.querySelectorAll<HTMLElement>("tr[data-frame-id]").forEach(row => {
+  const monotonicNow = performance.now();
+  ui.slots.querySelectorAll<HTMLElement>("tr[data-slot-id]").forEach(row => {
+    const result = results.get(row.dataset.slotId!);
     const stamp = row.querySelector(".frame-stamp");
-    if (stamp) stamp.textContent = `#${row.dataset.frameId} · ${(Number(row.dataset.frameTime) / 1000).toFixed(2)} s · อายุ ${((performance.now() - Number(row.dataset.captured)) / 1000).toFixed(1)} s`;
+    if (stamp && result) {
+      const age = evidenceAge(result, isVideoFile(), now(), monotonicNow);
+      const timeline = age.timelineMs === null ? "" : ` · Δคลิป ${(age.timelineMs / 1000).toFixed(1)} s`;
+      stamp.textContent = `#${result.id} · ${(result.time / 1000).toFixed(2)} s · อายุจริง ${(age.realtimeMs / 1000).toFixed(1)} s${timeline}`;
+    }
+    const s = slots.find((slot) => slot.id === row.dataset.slotId);
+    const cell = row.children[1] as HTMLTableCellElement | undefined;
+    if (s && cell) {
+      const status = displayStatus(s);
+      if (cell.firstChild?.textContent !== STATUS_LABEL[status]) cell.firstChild!.textContent = STATUS_LABEL[status];
+      cell.className = `slot-${status}`;
+    }
   });
-  if (snapshot) $("watchFrameInfo").textContent = `Snapshot #${snapshot.id} · ${isVideoFile() ? "เวลาวิดีโอ" : "เวลา monotonic"} ${(snapshot.time / 1000).toFixed(2)} s · อายุภาพ/ผล ${((performance.now() - snapshot.captured) / 1000).toFixed(1)} s${active ? " · กำลังตรวจ" : ""}`;
+  const liveOut = slots.filter((s) => displayStatus(s) === "out");
+  ui.outCount.textContent = String(liveOut.length);
+  ui.banner.hidden = liveOut.length === 0;
+  ui.banner.textContent = liveOut.length ? `ของหมด: ${liveOut.map((s) => s.name).join(", ")}` : "";
+  if (snapshot) {
+    const timelineGap = isVideoFile() ? Math.max(0, ui.video.currentTime * 1000 - snapshot.time) : null;
+    const resultAge = snapshot.resultAt === null ? null : Math.max(0, monotonicNow - snapshot.resultAt);
+    $("watchResultDelay").textContent = snapshot.resultDelayMs === null ? "—" : (snapshot.resultDelayMs / 1000).toFixed(1);
+    $("watchResultAge").textContent = resultAge === null ? (active?.id === snapshot.id ? "กำลังตรวจ" : "—") : (resultAge / 1000).toFixed(1);
+    $("watchTimelineGap").textContent = timelineGap === null ? "—" : (timelineGap / 1000).toFixed(1);
+    const state = resultAge !== null ? `ผลพร้อม · รอบ ${snapshot.cycleMs.toFixed(0)} ms` : active?.id === snapshot.id ? "กำลังตรวจ" : "รอบถูกยกเลิก";
+    const gap = timelineGap === null ? "" : ` · ห่างภาพปัจจุบัน ${(timelineGap / 1000).toFixed(1)} s`;
+    $("watchFrameInfo").textContent = `Snapshot #${snapshot.id} · ${isVideoFile() ? `คลิป ${(snapshot.time / 1000).toFixed(2)} s` : `monotonic ${(snapshot.time / 1000).toFixed(2)} s`} · อายุภาพจริง ${((monotonicNow - snapshot.captured) / 1000).toFixed(1)} s · ${state}${gap}`;
+  } else {
+    $("watchResultDelay").textContent = $("watchResultAge").textContent = $("watchTimelineGap").textContent = "—";
+  }
 }
 $("watchPlay").addEventListener("click", () => {
   if (!isVideoFile()) return;
@@ -600,7 +738,9 @@ ui.video.addEventListener("seeking", () => {
   invalidate(); resetTimers(); renderSlots(); drawOverlay();
 });
 ui.video.addEventListener("seeked", () => { if (wantsPlay) void playFile(); });
-ui.video.addEventListener("ended", () => { if (isVideoFile()) stop(endMessage(slots, tracks, Number(ui.hold.value))); });
+ui.video.addEventListener("ended", () => {
+  if (isVideoFile()) stop(endMessage(slots.filter((s) => displayStatus(s) === "checking"), tracks, Number(ui.hold.value)));
+});
 $("watchSpeed").addEventListener("change", () => { ui.video.playbackRate = Number($<HTMLSelectElement>("watchSpeed").value); });
 ui.video.addEventListener("timeupdate", updateTimeline);
 setInterval(updateTimeline, 250);
@@ -613,6 +753,7 @@ function closeSource() {
   stop();
   invalidate();
   resetTimers();
+  resetComparison();
   stream?.getTracks().forEach((t) => t.stop());
   stream = null;
   if (fileUrl) URL.revokeObjectURL(fileUrl);
@@ -734,6 +875,12 @@ export async function openWatch() {
   if (opened) return;
   opened = true;
   try { slots = parseSlots(localStorage.getItem(SLOTS_KEY)); } catch { /* private mode */ }
+  try {
+    ui.method.value = localStorage.getItem(METHOD_KEY) === "legacy" ? "legacy" : "full";
+  } catch { ui.method.value = "full"; }
+  ui.method.addEventListener("change", () => {
+    try { localStorage.setItem(METHOD_KEY, ui.method.value); } catch { /* private mode */ }
+  });
   syncLabels();
   syncNotifyBtn();
   renderSlots();

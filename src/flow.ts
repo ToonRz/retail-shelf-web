@@ -2,9 +2,7 @@
 // model is looking. Made to be read from a projector: one headline, the picture the web sends, which model is
 // working, and what the web decided from the answer.
 //
-// Smoothness: the model runs on the main thread (WASM, ~0.3-0.7 s per call), so anything animated here only uses
-// transform and opacity. Those run on the compositor and keep moving while a detect call blocks the page.
-// Before each call the strip waits for one painted frame (nextPaint), so the new state is on screen first.
+// Smoothness: keep the strip lightweight so it can update without delaying or holding a detection round.
 import type { Agent, DetectOptions, DetectResult } from "./agent-contract";
 import { modelsUsed, PHASES, type Phase, type Verdict } from "./ui/flow-logic";
 
@@ -19,14 +17,10 @@ export interface FlowStep {
   full?: boolean;          // the whole frame is sent (not a crop)
 }
 
-/** How long presenter mode keeps each kind of step on screen (ms). */
-export const HOLD_MS = { full: 1500, name: 450, confirm: 900, follow: 1000, slot: 1100, round: 1300 } as const;
-export type HoldKind = keyof typeof HOLD_MS;
-
 const LOG_LIMIT = 30;
 const THUMB_W = 360, THUMB_H = 200;
 const CORNER = 22;
-const SLOW_KEY = "watchFlowSlow", SHOW_KEY = "watchFlowShow";
+const SHOW_KEY = "watchFlowShow";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const reduceMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -34,7 +28,7 @@ const reduceMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matche
 export class FlowView {
   private el = {
     root: $("watchFlow"), title: $("flowTitle"), kicker: $("flowKicker"), phases: $("flowPhases"), round: $("flowRound"),
-    slow: $<HTMLInputElement>("flowSlow"), show: $<HTMLInputElement>("watchFlowShow"),
+    show: $<HTMLInputElement>("watchFlowShow"),
     thumb: $<HTMLCanvasElement>("flowThumb"), target: $("flowTarget"), call: $("flowCall"),
     release: $("flowRelease"), reply: $("flowReply"), wireOut: $("flowWireOut"),
     result: $("flowResult"), verdict: $("flowVerdict"), verdictSub: $("flowVerdictSub"),
@@ -59,11 +53,7 @@ export class FlowView {
     }
     this.el.thumb.width = THUMB_W;
     this.el.thumb.height = THUMB_H;
-    try {
-      this.el.slow.checked = localStorage.getItem(SLOW_KEY) === "1";
-      this.el.show.checked = localStorage.getItem(SHOW_KEY) !== "0";
-    } catch { /* private mode */ }
-    this.el.slow.addEventListener("change", () => { try { localStorage.setItem(SLOW_KEY, this.el.slow.checked ? "1" : "0"); } catch { /* private mode */ } });
+    try { this.el.show.checked = localStorage.getItem(SHOW_KEY) !== "0"; } catch { /* private mode */ }
     this.el.show.addEventListener("change", () => {
       try { localStorage.setItem(SHOW_KEY, this.el.show.checked ? "1" : "0"); } catch { /* private mode */ }
       this.syncShown();
@@ -75,8 +65,6 @@ export class FlowView {
   }
 
   get shown() { return this.el.show.checked; }
-  get slow() { return this.shown && this.el.slow.checked; }
-
   private syncShown() {
     this.el.root.hidden = !this.shown;
     if (!this.shown) this.moveScan(null);
@@ -184,19 +172,6 @@ export class FlowView {
     this.setModels([], "");
     this.setVerdict(v);
     this.moveScan(null);
-  }
-
-  // ------------------------------------------------------------ pacing
-
-  /** One painted frame, so a state set just before a blocking detect call is on screen while it runs. */
-  nextPaint(): Promise<void> {
-    if (!this.shown) return Promise.resolve();
-    return new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
-  }
-
-  /** Presenter mode: keep the answer on screen long enough to talk about it. */
-  hold(kind: HoldKind): Promise<void> {
-    return this.slow ? new Promise((r) => setTimeout(r, HOLD_MS[kind])) : Promise.resolve();
   }
 
   // ------------------------------------------------------------ parts

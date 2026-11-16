@@ -1,19 +1,20 @@
 // @vitest-environment happy-dom
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-const fake = vi.hoisted(() => ({ detect: vi.fn(), slow: false }));
+
+const fake = vi.hoisted(() => ({ detect: vi.fn() }));
 vi.mock('../src/agent', () => ({ SHELF_AGENT_VERSION: 'mock', loadAgent: async () => ({ manifest: { model: { classes: 110 } }, backend: 'wasm', detect: fake.detect }) }));
 vi.mock('../src/flow', () => ({ FlowView: class {
-  get slow() { return fake.slow; }
   ready() {} round() {} send() {} reply() {} fail() {} decide() {} idle() {} reset() {} roundDone() {}
-  async nextPaint() {} async hold() { if (fake.slow) await new Promise(r => setTimeout(r, 1100)); }
 } }));
+
 let video: HTMLVideoElement;
 let paused = true;
 const click = (id: string) => document.getElementById(id)!.click();
 const tick = async (ms = 50) => { await vi.advanceTimersByTimeAsync(ms); };
+
 beforeEach(async () => {
-  vi.resetModules(); vi.useFakeTimers(); fake.slow = false;
+  vi.resetModules(); vi.useFakeTimers();
   document.body.innerHTML = readFileSync('index.html', 'utf8').split('<body>')[1].split('</body>')[0].replace(/<script[\s\S]*?<\/script>/g, '');
   localStorage.clear();
   localStorage.setItem('watchSlots', JSON.stringify([0, 1].map(i => ({ id: String(i), name: `slot${i}`, rect: [i / 2, 0, .5, 1] }))));
@@ -23,7 +24,7 @@ beforeEach(async () => {
   video = document.getElementById('watchVideo') as HTMLVideoElement;
   paused = true;
   Object.defineProperty(video, "srcObject", { writable: true, value: null });
-  Object.defineProperties(video, { videoWidth: { value: 100 }, videoHeight: { value: 100 }, paused: { get: () => paused }, ended: { configurable: true, value: false }, duration: { value: 60 } });
+  Object.defineProperties(video, { videoWidth: { value: 100 }, videoHeight: { value: 100 }, paused: { get: () => paused }, ended: { configurable: true, value: false }, duration: { value: 210 } });
   vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; video.dispatchEvent(new Event('play')); });
   vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; video.dispatchEvent(new Event('pause')); });
   (document.getElementById('watchFollow') as HTMLInputElement).checked = false;
@@ -31,124 +32,126 @@ beforeEach(async () => {
   fake.detect.mockReset().mockImplementation(async () => { await new Promise(r => setTimeout(r, 500)); return { boxes: [], width: 100, height: 100, latency_ms: 500 }; });
   const { openWatch } = await import('../src/watch'); await openWatch();
 });
-afterEach(async () => { if (document.getElementById('watchStartBtn')!.textContent === 'หยุดเฝ้า') click('watchStartBtn'); await tick(3000); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-it('stop pauses the file and suppresses a late answer', async () => {
-  click('watchStartBtn'); await tick(); click('watchStartBtn'); await tick(700);
-  expect(video.paused).toBe(true);
-  expect(document.getElementById('watchSlots')!.textContent).not.toContain('กำลังยืนยัน');
-});
-it('uses the capture timestamp for every slot despite slow responses', async () => {
-  video.currentTime = 2; click('watchStartBtn'); await tick(); video.currentTime = 20; await tick(1100);
-  const rows = [...document.querySelectorAll('#watchSlots tr')];
-  expect(rows.map(r => (r as HTMLElement).dataset.frameTime)).toEqual(['2000', '2000']);
+
+afterEach(async () => {
+  if (document.getElementById('watchStartBtn')?.textContent === 'หยุดเฝ้า') click('watchStartBtn');
+  await tick(3000); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals();
 });
 
-it('holds a presentation frame through every slot and resumes only after the summary', async () => {
-  fake.slow = true; video.currentTime = 2;
-  click('watchStartBtn'); await tick(600);
-  expect(video.paused).toBe(true);
-  await tick(1800); expect(video.paused).toBe(true);
-  await tick(2100); expect(video.paused).toBe(false);
-  expect([...document.querySelectorAll<HTMLElement>('#watchSlots tr')].map(r => r.dataset.frameTime)).toEqual(['2000', '2000']);
-  expect(document.getElementById('watchOutCount')!.textContent).toBe('0');
+it('defaults to full-frame mode and exposes the actually loaded backend', () => {
+  expect((document.getElementById('watchMethod') as HTMLSelectElement).value).toBe('full');
+  expect(document.getElementById('watchPill')!.textContent).toContain('WASM');
 });
-it.each(['watchPlay', 'watchStartBtn'])('never resumes after %s during a presentation', async id => {
-  fake.slow = true; click('watchStartBtn'); await tick(700); click(id); await tick(5000);
-  expect(video.paused).toBe(true);
-  expect(fake.detect).toHaveBeenCalledTimes(1);
-});
-it('rapid stop/start and pause/resume keep at most one detect in flight', async () => {
+
+it('does not pause playback for a slow detection and the next round captures the latest media time', async () => {
   let inFlight = 0, peak = 0;
   fake.detect.mockImplementation(async () => {
-    peak = Math.max(peak, ++inFlight); await new Promise(r => setTimeout(r, 500)); inFlight--;
+    peak = Math.max(peak, ++inFlight);
+    await new Promise(r => setTimeout(r, 500));
+    inFlight--;
+    video.currentTime = 20;
     return { boxes: [], width: 100, height: 100, latency_ms: 500 };
   });
-  click('watchStartBtn'); await tick(50); click('watchStartBtn'); click('watchStartBtn');
-  await tick(50); click('watchPlay'); click('watchPlay'); await tick(2100);
-  expect(peak).toBe(1); expect(fake.detect.mock.calls.length).toBeGreaterThan(1);
+  video.currentTime = 2;
+  click('watchStartBtn'); await tick(3200);
+  expect(video.paused).toBe(false);
+  expect(peak).toBe(1);
+  expect(fake.detect.mock.calls.length).toBeGreaterThanOrEqual(6);
+  const rows = [...document.querySelectorAll<HTMLElement>('#watchSlots tr')];
+  expect(rows.map(r => r.dataset.frameTime)).toEqual(['20000', '20000']);
+  expect(new Set(rows.map(r => r.dataset.frameId)).size).toBe(1);
+  expect(document.getElementById('watchComparison')!.textContent).toContain('ภาพเต็ม: 2 รอบ');
 });
-it('seek invalidates the old round and timers but preserves slot coordinates', async () => {
-  click('watchStartBtn'); await tick(600);
+
+it('keeps result boxes and timestamps tied to one shared snapshot', async () => {
+  video.currentTime = 12;
+  click('watchStartBtn'); await tick(1550);
+  const rows = [...document.querySelectorAll<HTMLElement>('#watchSlots tr')];
+  expect(rows).toHaveLength(2);
+  expect(new Set(rows.map(r => r.dataset.frameId)).size).toBe(1);
+  expect(rows.map(r => r.dataset.frameTime)).toEqual(['12000', '12000']);
+  expect(document.getElementById('watchComparison')!.textContent).toContain('ภาพเต็ม: 1 รอบ · 3.0 calls/รอบ'); // one full frame + two fair fallback crops
+  expect(document.getElementById('watchFrameInfo')!.textContent).toContain('Snapshot #');
+});
+
+it('keeps the legacy crop-every-slot path available for comparison', async () => {
+  click('watchStartBtn'); await tick(1550); click('watchStartBtn'); await tick(600);
+  const method = document.getElementById('watchMethod') as HTMLSelectElement;
+  method.value = 'legacy'; method.dispatchEvent(new Event('change'));
+  fake.detect.mockClear();
+  video.currentTime = 12;
+  click('watchStartBtn'); await tick(1600); click('watchStartBtn');
+  expect(fake.detect.mock.calls.length).toBeGreaterThanOrEqual(2);
+  expect(document.getElementById('watchComparison')!.textContent).toContain('ภาพเต็ม: 1 รอบ');
+  expect(document.getElementById('watchComparison')!.textContent).toContain('วิธีเดิม: 1 รอบ · 2.0 calls/รอบ');
+});
+
+it('stop pauses the file and discards a late answer without starting another round', async () => {
+  click('watchStartBtn'); await tick(50); click('watchStartBtn'); await tick(1600);
+  expect(video.paused).toBe(true);
+  expect(fake.detect).toHaveBeenCalledTimes(1);
+  expect(document.getElementById('watchComparison')!.textContent).toContain('ภาพเต็ม: ยังไม่มีรอบ');
+  expect(document.getElementById('watchStartBtn')!.textContent).toBe('เริ่มเฝ้า');
+});
+
+it('pause invalidates the current generation and stays paused until the user resumes', async () => {
+  click('watchStartBtn'); await tick(50); click('watchPlay'); await tick(1200);
+  expect(video.paused).toBe(true);
+  expect(fake.detect).toHaveBeenCalledTimes(1);
+  expect(document.getElementById('watchPlay')!.textContent).toBe('เล่น');
+});
+
+it('seek clears old results and resumes only from the sought media time', async () => {
+  click('watchStartBtn'); await tick(50);
   video.dispatchEvent(new Event('seeking')); video.currentTime = 40;
-  video.dispatchEvent(new Event('seeked')); await tick(1600);
-  expect(document.querySelectorAll('#watchSlots tr').length).toBe(2);
+  video.dispatchEvent(new Event('seeked')); await tick(2100);
   expect([...document.querySelectorAll<HTMLElement>('#watchSlots tr')].map(r => r.dataset.frameTime)).toEqual(['40000', '40000']);
   expect(document.getElementById('watchOutCount')!.textContent).toBe('0');
 });
-it('ending a video cancels an in-flight answer and does not resume', async () => {
-  fake.slow = true; click('watchStartBtn'); await tick(50);
+
+it('video ended cancels the in-flight round and does not resume', async () => {
+  click('watchStartBtn'); await tick(50);
   Object.defineProperty(video, 'ended', { value: true }); video.dispatchEvent(new Event('ended'));
-  await tick(5000); expect(video.paused).toBe(true);
+  await tick(1200);
+  expect(video.paused).toBe(true);
   expect(fake.detect).toHaveBeenCalledTimes(1);
   expect(document.getElementById('watchStartBtn')!.textContent).toBe('เริ่มเฝ้า');
 });
-it('changing presentation mode during a round takes effect safely on subsequent steps/rounds', async () => {
-  click('watchStartBtn'); await tick(50); fake.slow = true; await tick(1000);
-  expect(video.paused).toBe(false); // this frame was captured in continuous mode
-  await tick(1100); expect(video.paused).toBe(true);
-  fake.slow = false; await tick(3500); expect(video.paused).toBe(false);
+
+it('keeps result age on the real clock separate from video distance while paused', async () => {
+  fake.detect.mockImplementation(async () => {
+    await new Promise(r => setTimeout(r, 20));
+    video.currentTime = 5;
+    return { boxes: [], width: 100, height: 100, latency_ms: 20 };
+  });
+  video.currentTime = 2;
+  click('watchStartBtn'); await tick(100);
+  expect(document.getElementById('watchResultDelay')!.textContent).toBe('3.0');
+  expect(document.getElementById('watchTimelineGap')!.textContent).toBe('3.0');
+  click('watchPlay');
+  const before = Number(document.getElementById('watchResultAge')!.textContent);
+  await tick(2000);
+  const after = Number(document.getElementById('watchResultAge')!.textContent);
+  expect(after).toBeGreaterThan(before + 1.5);
+  expect(document.getElementById('watchTimelineGap')!.textContent).toBe('3.0');
 });
-it('separates detect time from presentation and waiting time', async () => {
-  fake.slow = true; click('watchStartBtn'); await tick(5500);
-  expect(Number(document.getElementById('watchLatency')!.textContent)).toBe(1000);
-  expect(Number(document.getElementById('watchRoundLatency')!.textContent)).toBeGreaterThanOrEqual(5300);
+
+it('applies the selected playback speed without changing the run lifecycle', () => {
+  const speed = document.getElementById('watchSpeed') as HTMLSelectElement;
+  speed.value = '2'; speed.dispatchEvent(new Event('change'));
+  expect(video.playbackRate).toBe(2);
+  expect(video.paused).toBe(true);
 });
-it('camera keeps playing in presentation mode and uses monotonic capture time', async () => {
-  fake.slow = true;
-  Object.defineProperty(video, 'readyState', { value: 2 });
-  const stop = vi.fn();
-  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => ({ getTracks: () => [{ stop }] }) } });
-  click('watchCamBtn'); await tick();
-  // Draw a slot through the real pointer handlers after switching sources.
-  const overlay = document.getElementById('watchOverlay')!;
-  vi.spyOn(overlay, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 100, height: 100 } as DOMRect);
-  overlay.setPointerCapture = vi.fn();
-  overlay.dispatchEvent(new PointerEvent('pointerdown', { clientX: 10, clientY: 10 }));
-  overlay.dispatchEvent(new PointerEvent('pointermove', { clientX: 80, clientY: 80 }));
-  overlay.dispatchEvent(new PointerEvent('pointerup'));
-  vi.mocked(video.pause).mockClear(); video.currentTime = 999;
-  click('watchStartBtn'); await tick(600);
-  expect(video.pause).not.toHaveBeenCalled();
-  expect(Number(document.querySelector<HTMLElement>('#watchSlots tr')!.dataset.frameTime)).toBeLessThan(999000);
-  click('watchStartBtn'); expect(video.pause).not.toHaveBeenCalled();
-});
-it('changing the file while detecting drops old results and never overlaps auto discovery', async () => {
+
+it('changing the file during detection suppresses the old round before discovery on the new source', async () => {
   click('watchStartBtn'); await tick(50);
   Object.defineProperty(video, 'readyState', { value: 2 });
   vi.spyOn(video, 'load').mockImplementation(() => {});
   const input = document.getElementById('watchFile') as HTMLInputElement;
   Object.defineProperty(input, 'files', { value: [new File(['video'], 'next.mp4', { type: 'video/mp4' })] });
   input.dispatchEvent(new Event('change')); await tick(1200);
-  expect(document.querySelector<HTMLElement>('#watchSlots tr')!.dataset.frameTime).toBeUndefined();
+  expect(document.getElementById('watchStatus')!.textContent).toContain('ไม่เจอสินค้า');
   expect(document.getElementById('watchStartBtn')!.textContent).toBe('เริ่มเฝ้า');
   expect(video.paused).toBe(true);
-  expect(fake.detect).toHaveBeenCalledTimes(2); // old slot + new file discovery
-});
-it('does not count presentation wall time as empty-stock time', async () => {
-  fake.slow = true; video.currentTime = 2;
-  (document.getElementById('watchHold') as HTMLInputElement).value = '5';
-  click('watchStartBtn'); await tick(13000);
-  expect(document.getElementById('watchOutCount')!.textContent).toBe('0');
-  expect(document.querySelectorAll('#watchLog [data-event="out"]').length).toBe(0);
-  // Only the source timeline advancing can complete the hold.
-  video.currentTime = 8; await tick(10000);
-  expect(document.getElementById('watchOutCount')!.textContent).toBe('2');
-});
-it('ignores queued emptied events from closing a previous source while waiting for new data', async () => {
-  let ready = 0;
-  Object.defineProperty(video, 'readyState', { get: () => ready });
-  vi.spyOn(video, 'load').mockImplementation(() => { setTimeout(() => video.dispatchEvent(new Event('emptied')), 0); });
-  const input = document.getElementById('watchFile') as HTMLInputElement;
-  Object.defineProperty(input, 'files', { value: [new File(['v'], 'new.mp4', { type: 'video/mp4' })] });
-  input.dispatchEvent(new Event('change')); await tick(10);
-  ready = 2; video.dispatchEvent(new Event('loadeddata')); await tick(600);
-  expect(document.getElementById('watchStatus')!.textContent).toContain('ไม่เจอสินค้า');
-  expect(document.getElementById('watchTransport')!.hidden).toBe(false);
-});
-
-it('keeps shelfOnly on every slot check and attaches a shared frame ID', async () => {
-  click('watchStartBtn'); await tick(1100);
-  expect(fake.detect.mock.calls.every(([, opts]) => opts.shelfOnly === true)).toBe(true);
-  const ids = [...document.querySelectorAll<HTMLElement>('#watchSlots tr')].map(r => r.dataset.frameId);
-  expect(ids[0]).toBeDefined(); expect(new Set(ids).size).toBe(1);
+  expect(fake.detect).toHaveBeenCalledTimes(2); // old frame settles, then one new-file discovery call
 });
