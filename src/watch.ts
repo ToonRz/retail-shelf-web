@@ -1,7 +1,9 @@
 // Shelf watch page: draw one box per product slot (or let "auto slots" find them on a full shelf),
 // then get an alert when a slot stays empty. A picture or video file finds its slots as soon as it is opened.
 // Each slot is cropped from the camera, a video file or a still picture and checked for any product box with the 1-class shelf model only (shelfOnly).
-import type { Agent, Backend, DetectInput, DetectOptions, DetectResult } from "./agent-contract";
+import type { Agent, Backend, DetectOptions, DetectResult } from "./agent-contract";
+import { FlowView, type FlowStep, type HoldKind } from "./flow";
+import { confirmVerdict, followVerdict, foundVerdict, nameVerdict, roundVerdict, slotVerdict, topNameConf } from "./ui/flow-logic";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
 import { autoSlots, clipRect, composeView, relView, cropLabel, endMessage, fitViews, frameMotion, MIN_SHARP, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
@@ -17,24 +19,6 @@ const NAME_PADS = [0.15, 0.4]; // crop around a product box, grown by this much 
 const GRAY_W = 128, GRAY_H = 96; // the small copy of each frame the view is matched on
 const LOST_REFIT = 2;     // rounds in a row without a clear move from the last frame before trying the reference alone
 const MIN_VISIBLE = 0.4;   // a slot with less of it inside the frame (zoomed in) is not judged: its timers pause
-const FLOW_LIMIT = 8;
-
-type FlowModelKey = "primary" | "shelf";
-interface FlowModel { key: FlowModelKey; name: string; dataset: string; classes: number; sha256?: string; role: string }
-interface FlowCall {
-  id: number;
-  time: string;
-  round: number | null;
-  purpose: string;
-  detail: string;
-  width: number;
-  height: number;
-  options: DetectOptions;
-  models: FlowModel[];
-  status: "pending" | "ok" | "failed";
-  result?: DetectResult;
-  error?: string;
-}
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const ui = {
@@ -45,7 +29,6 @@ const ui = {
   banner: $("watchBanner"), outCount: $("watchOutCount"), latency: $("watchLatency"), slots: $("watchSlots"), log: $("watchLog"),
   notifyBtn: $<HTMLButtonElement>("watchNotifyBtn"), sound: $<HTMLInputElement>("watchSound"), follow: $<HTMLInputElement>("watchFollow"), status: $("watchStatus"),
   progress: $<HTMLProgressElement>("watchProgress"), pill: $("watchPill"), backend: $<HTMLSelectElement>("backend"),
-  flowState: $("watchFlowState"), flowRelease: $("watchFlowRelease"), flowDecision: $("watchFlowDecision"), flowModels: $("watchFlowModels"), flowRound: $("watchFlowRound"), flowEvents: $("watchFlowEvents"),
 };
 
 let agent: Agent | null = null;
@@ -58,9 +41,6 @@ let isImage = false; // the source is a still picture (ui.image) instead of ui.v
 let running = false;
 let finding = false; // auto slots in progress
 let watchRound = 0;
-let flowId = 0;
-let flowCalls: FlowCall[] = [];
-let frameMonitorTime: string | null = null;
 let drag: { x0: number; y0: number; x1: number; y1: number } | null = null;
 let audio: AudioContext | null = null;
 // Follow the view: slots are kept in the coordinates of a reference frame (the first watched frame after the slots
@@ -78,164 +58,34 @@ const isAway = (s: Slot) => visibleFraction(slotRect(s)) < MIN_VISIBLE; // zoome
 const thumbCtx = Object.assign(document.createElement("canvas"), { width: THUMB, height: THUMB }).getContext("2d", { willReadFrequently: true })!;
 
 const setStatus = (text: string, bad = false) => { ui.status.textContent = text; ui.status.classList.toggle("bad", bad); };
-function flowModelsFor(options: DetectOptions): FlowModel[] {
-  if (!agent) return [];
-  const primary = { key: "primary" as const, ...agent.manifest.model, role: "ตรวจจับและระบุชื่อสินค้า" };
-  const shelfInfo = agent.manifest.shelfModel;
-  const shelf = shelfInfo ? { key: "shelf" as const, ...shelfInfo, role: "ยืนยันช่องและตามตำแหน่งภาพ" } : null;
-  if (options.shelfOnly) return [shelf ?? { ...primary, role: "release นี้ไม่มี shelfModel · ใช้ model หลัก" }];
-  return shelf ? [primary, shelf] : [primary];
+/** Where a part of the frame (fractions) is drawn on the stage, in its pixels (the media is fitted with object-fit: contain). */
+function onStage([x, y, w, h]: Rect): Rect | null {
+  const [W, H] = frameSize(), sw = ui.stage.clientWidth, sh = ui.stage.clientHeight;
+  if (!W || !H || !sw || !sh || ui.overlay.hidden) return null;
+  const k = Math.min(sw / W, sh / H), ox = (sw - W * k) / 2, oy = (sh - H * k) / 2;
+  return [ox + x * W * k, oy + y * H * k, w * W * k, h * H * k];
 }
 
-function setFlowState(text: string, kind: "busy" | "error" | "" = "") {
-  ui.flowState.textContent = text;
-  ui.flowState.className = `flow-state${kind ? ` ${kind}` : ""}`;
-}
+const flow = new FlowView(onStage);
 
-function setFlowDecision(text: string) {
-  ui.flowDecision.textContent = text;
-}
-
-function renderFlowModels() {
-  if (!agent) return;
-  ui.flowRelease.textContent = `agent ${agent.manifest.version} · backend ${agent.backend}`;
-  const active = new Set(flowCalls[0]?.models.map((model) => model.key) ?? []);
-  const activeRoles = new Map(flowCalls[0]?.models.map((model) => [model.key, model.role]) ?? []);
-  const models = [
-    { key: "primary" as const, info: agent.manifest.model, role: "ค้นหาสินค้า / ตั้งชื่อ / ตรวจจับ" },
-    ...(agent.manifest.shelfModel ? [{ key: "shelf" as const, info: agent.manifest.shelfModel, role: "ยืนยันช่อง / เฝ้าต่อเนื่อง" }] : []),
-  ];
-  ui.flowModels.replaceChildren();
-  for (const { key, info, role } of models) {
-    const card = document.createElement("article");
-    card.className = `flow-model${active.has(key) ? " active" : ""}`;
-    const head = document.createElement("div");
-    head.className = "flow-model-head";
-    const name = document.createElement("strong");
-    name.textContent = info.name;
-    const purpose = document.createElement("span");
-    purpose.className = "flow-model-role";
-    purpose.textContent = active.has(key) ? `กำลังใช้ · ${activeRoles.get(key) ?? role}` : role;
-    head.append(name, purpose);
-    const meta = document.createElement("div");
-    meta.className = "flow-model-meta";
-    meta.textContent = `${info.dataset} · ${info.classes} ${info.classes === 1 ? "class" : "classes"}`;
-    card.append(head, meta);
-    if (info.sha256) {
-      const hashDetails = document.createElement("details");
-      hashDetails.className = "flow-model-hash";
-      const summary = document.createElement("summary");
-      summary.textContent = `model SHA-256 · ${info.sha256.slice(0, 12)}…`;
-      const hash = document.createElement("code");
-      hash.textContent = info.sha256;
-      hashDetails.append(summary, hash);
-      card.append(hashDetails);
-    }
-    ui.flowModels.append(card);
-  }
-}
-
-function renderFlowCalls() {
-  ui.flowEvents.replaceChildren();
-  if (!flowCalls.length) {
-    const empty = document.createElement("li");
-    empty.className = "muted";
-    empty.textContent = "รอส่งภาพให้ agent";
-    ui.flowEvents.append(empty);
-    return;
-  }
-  for (const call of flowCalls) {
-    const item = document.createElement("li");
-    item.dataset.flowId = String(call.id);
-    item.className = `flow-event${call.status === "pending" ? " pending" : call.status === "failed" ? " failed" : ""}`;
-    const head = document.createElement("div");
-    head.className = "flow-event-head";
-    const direction = document.createElement("strong");
-    direction.textContent = call.status === "pending" ? "WEB → AGENT" : call.status === "ok" ? "WEB → AGENT → WEB" : "WEB → AGENT · error";
-    const timestamp = document.createElement("span");
-    timestamp.textContent = call.time;
-    head.append(direction, timestamp);
-    const title = document.createElement("div");
-    title.className = "flow-event-title";
-    title.textContent = `${call.purpose}${call.detail ? ` · ${call.detail}` : ""}${call.round === null ? "" : ` · รอบ #${String(call.round).padStart(4, "0")}`}`;
-    const request = document.createElement("div");
-    request.className = "flow-event-call";
-    const requestCode = document.createElement("code");
-    requestCode.textContent = `agent.detect(image, ${JSON.stringify(call.options)}) · ${call.width} × ${call.height} px`;
-    request.append(requestCode);
-    item.append(head, title, request);
-    if (call.result) {
-      const response = document.createElement("div");
-      response.className = "flow-event-result";
-      response.textContent = `AGENT → WEB · ${call.result.boxes.length} ${call.result.boxes.length === 1 ? "box" : "boxes"} · ${call.result.latency_ms} ms · ${call.result.backend}`;
-      const hash = document.createElement("div");
-      hash.className = "flow-event-hash";
-      hash.textContent = `DetectResult.model_sha256 · ${call.result.model_sha256}`;
-      const payload = document.createElement("details");
-      payload.className = "flow-payload";
-      const summary = document.createElement("summary");
-      summary.textContent = "ดู DetectResult ที่ agent คืนมา";
-      const pre = document.createElement("pre");
-      pre.textContent = JSON.stringify(call.result, null, 2);
-      payload.append(summary, pre);
-      item.append(response, hash, payload);
-    } else if (call.error) {
-      const error = document.createElement("div");
-      error.className = "flow-event-result";
-      error.textContent = `Agent → WEB · ${call.error}`;
-      item.append(error);
-    } else {
-      const pending = document.createElement("div");
-      pending.className = "flow-event-result";
-      pending.textContent = "agent กำลังประมวลผล…";
-      item.append(pending);
-    }
-    item.title = call.models.map((model) => `${model.name} · ${model.dataset}`).join(" + ");
-    ui.flowEvents.append(item);
-  }
-}
-
-function imageSize(image: DetectInput): [number, number] {
-  const source = image as { width?: number; height?: number; naturalWidth?: number; naturalHeight?: number };
-  return [source.naturalWidth || source.width || 0, source.naturalHeight || source.height || 0];
-}
-
-function currentSourceTime(): string {
-  if (isVideoFile() && ui.video.readyState >= 1) return `วิดีโอ ${ui.video.currentTime.toFixed(1)}s`;
-  return new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-function monitorTime(): string { return frameMonitorTime ?? currentSourceTime(); }
-
-async function detectWithFlow(image: DetectInput, options: DetectOptions, purpose: string, detail = ""): Promise<DetectResult> {
-  if (!agent) throw new Error("agent ยังไม่พร้อม");
-  const [width, height] = imageSize(image);
-  const call: FlowCall = {
-    id: ++flowId, time: monitorTime(), round: running ? watchRound : null, purpose, detail, width, height,
-    options: { ...options }, models: flowModelsFor(options), status: "pending",
-  };
-  flowCalls.unshift(call);
-  if (flowCalls.length > FLOW_LIMIT) flowCalls.length = FLOW_LIMIT;
-  ui.flowRound.textContent = call.round === null ? "หาช่อง / ตั้งชื่อ" : `รอบเฝ้า #${String(call.round).padStart(4, "0")}`;
-  setFlowState("ส่งภาพให้ agent", "busy");
-  renderFlowModels();
-  renderFlowCalls();
-  await breathe();
+/** agent.detect, shown on the flow strip: the picture goes out, the models light up, the answer comes back. */
+async function detectShown(image: ImageBitmap, options: DetectOptions, step: FlowStep): Promise<DetectResult> {
+  flow.send(step, image, options);
+  await flow.nextPaint();
   try {
-    call.result = await agent.detect(image, options);
-    call.status = "ok";
-    setFlowState(`รับผลแล้ว · ${call.result.latency_ms} ms`);
-    renderFlowModels();
-    renderFlowCalls();
-    return call.result;
-  } catch (error) {
-    call.status = "failed";
-    call.error = error instanceof Error ? error.message : String(error);
-    setFlowState("ตรวจไม่สำเร็จ", "error");
-    renderFlowModels();
-    renderFlowCalls();
-    throw error;
+    const r = await agent!.detect(image, options);
+    flow.reply(r, options);
+    return r;
+  } catch (e) {
+    flow.fail(errorMessage(e));
+    throw e;
   }
+}
+
+/** Shows what the web made of an answer; in presenter mode it then stays on screen for a moment. */
+async function decide(v: Parameters<FlowView["decide"]>[0], kind: HoldKind) {
+  flow.decide(v);
+  await flow.hold(kind);
 }
 
 const media = () => (isImage ? ui.image : ui.video);
@@ -376,21 +226,26 @@ async function findSlots(ask = true) {
   };
   let frame: ImageBitmap | null = null;
   try {
-    frameMonitorTime = currentSourceTime();
     frame = await createImageBitmap(media());
+    flow.round(null);
     await step("กำลังหาสินค้าในภาพ…", 0, 1);
     const conf = Number(ui.conf.value);
     const classes = agent.manifest.model.classes;
-    const r = await detectWithFlow(frame, { conf }, "หาสินค้าอัตโนมัติ", "ภาพเต็ม"); // both models locate products before each name crop
+    // no shelfOnly: names from the 110-class model + "product" boxes of the shelf model
+    const r = await detectShown(frame, { conf }, { phase: "find", step: 0, title: "หาสินค้าทุกชิ้นในภาพ", target: "ภาพเต็ม", area: [0, 0, 1, 1], full: true });
     const items = toFoundItems(r.boxes, classes, r.width, r.height);
+    await decide(foundVerdict(items.length), "full");
     const toName = items.slice(0, MAX_NAME_CROPS);
     for (const [k, it] of toName.entries()) {
       await step(`กำลังระบุชื่อสินค้า ${k + 1} / ${toName.length}…`, k, toName.length);
-      for (const pad of NAME_PADS) { // a wider crop when the first one gives no confident name
-        const crop = await createImageBitmap(frame!, ...cropRect(it.xyxy, r.width, r.height, pad));
+      for (const [p, pad] of NAME_PADS.entries()) { // a wider crop when the first one gives no confident name
+        const cr = cropRect(it.xyxy, r.width, r.height, pad);
+        const crop = await createImageBitmap(frame!, ...cr);
         try {
-          const c = await detectWithFlow(crop, { conf: Math.max(conf, NAME_CONF) }, "ระบุชื่อสินค้า", `สินค้า ${k + 1} / ${toName.length}`);
+          const area: Rect = [cr[0] / r.width, cr[1] / r.height, cr[2] / r.width, cr[3] / r.height];
+          const c = await detectShown(crop, { conf: Math.max(conf, NAME_CONF) }, { phase: "find", step: 1, title: `ระบุชื่อสินค้า ชิ้นที่ ${k + 1} / ${toName.length}`, target: p ? "ครอปกว้างขึ้น" : "ครอปรอบสินค้า", area });
           it.name = cropLabel(c.boxes, classes, c.width, c.height);
+          await decide(nameVerdict(it.name, topNameConf(c.boxes, classes), p === NAME_PADS.length - 1), "name");
         } finally {
           crop.close();
         }
@@ -405,8 +260,10 @@ async function findSlots(ask = true) {
       await step(`กำลังตรวจช่อง ${k + 1} / ${candidates.length}…`, k, candidates.length);
       const crop = await cropSlot(frame!, f.rect);
       try {
-        const c = await detectWithFlow(crop, { conf, shelfOnly: true }, "ยืนยันช่อง", f.name);
-        if (slotHasProduct(c.boxes, c.width, c.height)) found.push(f);
+        const c = await detectShown(crop, { conf, shelfOnly: true }, { phase: "find", step: 2, title: `ยืนยันช่อง “${f.name}” (${k + 1} / ${candidates.length})`, target: "ครอปช่อง", area: f.rect });
+        const has = slotHasProduct(c.boxes, c.width, c.height);
+        if (has) found.push(f);
+        await decide(confirmVerdict(has), "confirm");
       } finally {
         crop.close();
       }
@@ -414,7 +271,7 @@ async function findSlots(ask = true) {
     if (!found.length) {
       if (resume) void ui.video.play();
       setStatus("ไม่เจอสินค้าในภาพ ลองตอนชั้นเต็ม ลดความมั่นใจขั้นต่ำ หรือลากกรอบเอง", true);
-      setFlowState("ไม่พบช่องที่ยืนยันได้", "error");
+      flow.idle("หาช่องไม่เจอ", "ลองตอนชั้นเต็ม ลดความมั่นใจขั้นต่ำ หรือลากกรอบเอง");
       return;
     }
     slots = found.map((f) => ({ id: crypto.randomUUID(), ...f }));
@@ -424,13 +281,12 @@ async function findSlots(ask = true) {
     const named = items.filter((i) => i.name !== null).length;
     const dropped = candidates.length - found.length;
     setStatus(`เจอ ${found.length} ช่อง จากสินค้า ${items.length} ชิ้น (รู้ชื่อ ${named} ชิ้น)${dropped ? ` · ตัด ${dropped} ช่องที่ตอนนี้ก็ดูว่างอยู่แล้ว` : ""} · ตรวจกรอบ แก้ชื่อ ลบ หรือลากเพิ่มได้ แล้วกดเริ่มเฝ้า${isVideoFile() ? " (วิดีโอหยุดรอที่ภาพนี้)" : ""}`);
-    setFlowState(`หาช่องเสร็จ · ยืนยัน ${found.length} ช่องด้วย agent`);
+    flow.idle(`ได้ ${found.length} ช่อง`, "พร้อมเฝ้า · กด “เริ่มเฝ้า”");
   } catch (e) {
     if (resume) void ui.video.play();
     setStatus(`หาช่องไม่สำเร็จ: ${errorMessage(e)}`, true);
-    setFlowState("หาช่องไม่สำเร็จ", "error");
+    flow.idle("หาช่องไม่สำเร็จ", errorMessage(e));
   } finally {
-    frameMonitorTime = null;
     frame?.close();
     finding = false;
     ui.progress.hidden = true;
@@ -493,13 +349,10 @@ function cropSlot(src: HTMLVideoElement | HTMLImageElement | ImageBitmap, [x, y,
   return createImageBitmap(src, Math.round(x * W), Math.round(y * H), Math.max(1, Math.round(w * W)), Math.max(1, Math.round(h * H)));
 }
 
-async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdMs: number; clearMs: number }): Promise<number> {
+async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdMs: number; clearMs: number }, k: number): Promise<number> {
   const rect = slotRect(s);
   if (isAway(s)) { // zoomed or panned away: says nothing about the stock, like a blocked slot
-    const previous = tracks.get(s.id) ?? newTrack();
-    const { track } = stepTrack(previous, false, true, now(), cfg);
-    tracks.set(s.id, track);
-    setFlowDecision(`เว็บ · ${s.name} → ${STATUS_TH[track.status]} · ช่องอยู่นอกภาพ จึงพักตัวนับเวลา`);
+    tracks.set(s.id, stepTrack(tracks.get(s.id) ?? newTrack(), false, true, now(), cfg).track);
     thumbs.delete(s.id);
     return 0;
   }
@@ -509,13 +362,16 @@ async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdM
     const gray = toGray(thumbCtx.getImageData(0, 0, THUMB, THUMB).data);
     const prev = thumbs.get(s.id);
     thumbs.set(s.id, gray);
-    const r = await detectWithFlow(crop, { conf, shelfOnly: true }, "ตรวจสถานะช่อง", s.name); // only "is there a box" matters here: skip the 110-class model
+    // only "is there a box" matters here: skip the 110-class model
+    const r = await detectShown(crop, { conf, shelfOnly: true }, { phase: "watch", step: 1, title: `ตรวจช่อง “${s.name}” (${k + 1} / ${slots.length})`, target: "ครอปช่อง", area: clipRect(rect) });
     const has = slotHasProduct(r.boxes, r.width, r.height);
     const blocked = prev !== undefined && motionScore(prev, gray) > MOTION_BLOCKED;
+    const before = tracks.get(s.id)?.status;
     const { track, event } = stepTrack(tracks.get(s.id) ?? newTrack(), has, blocked, now(), cfg);
     tracks.set(s.id, track);
-    setFlowDecision(`เว็บ · ${s.name} → ${STATUS_TH[track.status]} · hasProduct=${has} · blocked=${blocked}${event ? ` · ${event}` : ""}`);
     if (event) logEvent(s, event);
+    if (track.status !== before) { renderSlots(); drawOverlay(); } // the screen follows each answer, not only the end of the round
+    await decide(slotVerdict(track, has, blocked, event, now(), cfg.holdMs), "slot");
     return r.latency_ms;
   } finally {
     crop.close();
@@ -531,7 +387,8 @@ async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdM
  * (fitViews), the pictures pick one (refineView).
  */
 async function followView(frame: ImageBitmap, conf: number): Promise<number> {
-  const r = await detectWithFlow(frame, { conf, shelfOnly: true }, "หาตำแหน่งชั้น", "ภาพเต็ม / follow-view");
+  const r = await detectShown(frame, { conf, shelfOnly: true }, { phase: "watch", step: 0, title: "เช็กว่ากล้องขยับไหม", target: "ภาพเต็ม", area: [0, 0, 1, 1], full: true });
+  const before = view;
   const boxes = normBoxes(r.boxes, r.width, r.height);
   grayCtx.drawImage(frame, 0, 0, GRAY_W, GRAY_H);
   const gray: Gray = { w: GRAY_W, h: GRAY_H, px: toGray(grayCtx.getImageData(0, 0, GRAY_W, GRAY_H).data) };
@@ -553,6 +410,7 @@ async function followView(frame: ImageBitmap, conf: number): Promise<number> {
     }
   }
   setStatus(watchStatus());
+  await decide(followVerdict(r.boxes.length, view.s, view !== before, lost > 0), "follow");
   return r.latency_ms;
 }
 
@@ -565,25 +423,24 @@ async function loop() {
   while (running) {
     if (isVideoFile() && ui.video.ended) { stop(endMessage(slots, tracks, Number(ui.hold.value))); break; }
     const t0 = performance.now();
-    const round = ++watchRound;
-    ui.flowRound.textContent = `รอบเฝ้า #${String(round).padStart(4, "0")}`;
-    setFlowState(`กำลังตรวจรอบ #${String(round).padStart(4, "0")}`, "busy");
+    flow.round(++watchRound);
     const cfg = { holdMs: Number(ui.hold.value) * 1000, clearMs: CLEAR_MS };
     const conf = Number(ui.conf.value);
     let frame: ImageBitmap | null = null;
     try {
-      frameMonitorTime = currentSourceTime();
       frame = await createImageBitmap(media()); // one still per round: the view and every slot come from the same frame
       let total = 0;
       if (ui.follow.checked) { total += await followView(frame, conf); await breathe(); }
-      for (const s of slots) { total += await checkSlot(frame, s, conf, cfg); await breathe(); }
+      for (const [k, s] of slots.entries()) { if (!running) break; total += await checkSlot(frame, s, conf, cfg, k); await breathe(); }
       ui.latency.textContent = total.toFixed(0);
-      setFlowState(`จบรอบ #${String(round).padStart(4, "0")} · inference ${total.toFixed(0)} ms · จริง ${(performance.now() - t0).toFixed(0)} ms`);
+      if (running) {
+        flow.roundDone(roundVerdict(slots.filter((s) => !isAway(s)).map((s) => tracks.get(s.id)?.status ?? "waiting"), slots.filter(isAway).length));
+        await flow.hold("round");
+      }
     } catch (e) {
       stop(`ตรวจไม่สำเร็จ: ${errorMessage(e)}`, true);
       break;
     } finally {
-      frameMonitorTime = null;
       frame?.close();
     }
     renderSlots();
@@ -598,8 +455,6 @@ function start() {
   watchRound = 0;
   ui.log.replaceChildren(Object.assign(document.createElement("li"), { className: "muted placeholder", textContent: "ยังไม่มีการแจ้งเตือน" }));
   running = true;
-  setFlowState("เริ่มเฝ้าชั้นวาง", "busy");
-  ui.flowRound.textContent = "รอบเฝ้า #0001";
   audio?.resume();
   if ("Notification" in window && Notification.permission === "default") void askNotify(); // the start click is the gesture
   renderSlots();
@@ -614,7 +469,7 @@ function stop(message = "หยุดเฝ้าแล้ว", bad = false) {
   renderSlots();
   updateControls();
   setStatus(message, bad);
-  setFlowState(bad ? "หยุดเพราะตรวจไม่สำเร็จ" : "หยุดเฝ้าชั้นวาง", bad ? "error" : "");
+  if (!bad) flow.idle("หยุดเฝ้าแล้ว", message === "หยุดเฝ้าแล้ว" ? "กด “เริ่มเฝ้า” เพื่อเฝ้าต่อ" : message);
 }
 
 ui.startBtn.addEventListener("click", () => (running ? stop() : start()));
@@ -630,10 +485,8 @@ function closeSource() {
   ui.video.srcObject = null;
   ui.video.load(); // drop the old frame, so videoWidth is 0 until the new source is ready
   isImage = false;
-  flowCalls = [];
-  renderFlowCalls();
-  setFlowDecision("เว็บจะอัปเดตสถานะหลังรับผลจาก agent");
-  setFlowState("รอเลือกภาพชั้นวาง");
+  flow.reset();
+  flow.idle("รอภาพ", "เลือกรูป / วิดีโอ หรือเปิดกล้อง");
   resetView();
   ui.image.removeAttribute("src");
   ui.video.hidden = ui.image.hidden = ui.overlay.hidden = true;
@@ -661,7 +514,7 @@ async function showSource() {
   drawOverlay();
   updateControls();
   setStatus("กดหาช่องอัตโนมัติตอนชั้นเต็ม หรือลากกรอบรอบสินค้าแต่ละชนิด แล้วกดเริ่มเฝ้า");
-  setFlowState("ภาพพร้อม · รอเลือกช่อง");
+  flow.idle("ภาพพร้อม", "กดหาช่องอัตโนมัติ หรือลากกรอบรอบสินค้าเอง");
 }
 
 ui.camBtn.addEventListener("click", async () => {
@@ -741,8 +594,7 @@ export async function openWatch() {
       if (total) { ui.progress.max = total; ui.progress.value = loaded; }
       setStatus(`กำลังโหลด model ${formatMB(loaded)}${total ? ` / ${formatMB(total)}` : ""} MB`);
     }, SHELF_AGENT_VERSION);
-    renderFlowModels();
-    setFlowState("agent พร้อม · เลือกภาพหรือวิดีโอ");
+    flow.ready(agent);
     ui.pill.textContent = `agent ${agent.manifest.version} · ${agent.backend === "webgpu" ? "WebGPU" : "WASM"}`;
     ui.camBtn.disabled = ui.fileBtn.disabled = false;
     setStatus("พร้อมใช้ · เปิดกล้อง หรือเลือก / ลากรูปหรือวิดีโอตอนชั้นเต็มมาวาง (หาช่องให้อัตโนมัติ)");
@@ -750,6 +602,7 @@ export async function openWatch() {
   } catch (e) {
     opened = false;
     setStatus(`โหลด agent ไม่ได้: ${errorMessage(e)}`, true);
+    flow.idle("โหลด agent ไม่ได้", errorMessage(e));
   } finally {
     ui.progress.hidden = true;
   }
