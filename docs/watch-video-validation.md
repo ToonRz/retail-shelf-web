@@ -60,3 +60,18 @@ Causes and fixes (`src/watch.ts`, `src/ui/watch-logic.ts`):
 3. Evidence was marked stale after 5 s of wall-clock time even when the clip was paused or ended, which also hid raised alerts. A file is now judged on its own timeline only, the stale limit is the hold time (at least 5 s), and a raised "ของหมด" stays until the slot is seen filled.
 
 Naming (`cropLabel`, `autoSlots`, `NAME_CONF`) did not change between `912bbb9` and `060b35f`; on these clips both gave identical names and rects. The user's own clip was not available here, so naming on a real dense shelf was not re-checked.
+
+## Stale video frames on a busy main thread — 2026-11-16 (later)
+
+Report from Chrome on a Mac (WASM, crop-every-slot mode, `public/samples/demo-shelf.mp4`): at the end of the clip every slot still read "มีของ". The snapshot sent to the model showed the 0:02 frame (full shelf) while stamped 119.5 s, and the stage showed the 0:50 frame at 2:00. A round there took ~2.5 s (7 back-to-back `detect()` calls), so the wait between rounds was 0 and the page never gave the browser a rendering step; the video kept handing `drawImage` an old frame while `currentTime` ran on.
+
+Fix (`src/watch.ts`): `capture()` waits (≤ 300 ms) for `requestVideoFrameCallback` on a playing video and draws right after it, stamping the frame with the callback's `mediaTime`; `detectShown()` waits for one painted frame (`painted`, ≤ 50 ms when animation frames do not run) before each model call. Test: `watch-session.test.ts` "stamps a playing frame with the media time of the frame on screen".
+
+Headless Chromium on Linux did not show the stale frames before the fix, so the original failure was not reproduced here. After the fix, on the same clip (WASM, conf 0.25, hold 15 s):
+
+| Mode | lays out | pocky out | lays restocked | copp out | hanami (half emptied) |
+|---|---|---|---|---|---|
+| Full frame | 0:37.1 | 1:02.2 | 1:20.1 | 1:46.6 | no alert |
+| Crop every slot | 0:38.0 | 1:08.4 | 1:23.6 | 1:50.3 | no alert |
+
+Expected (hold 15 s): ~0:35, ~1:00 (later if the person walking past at 1:02–1:07 blocks the slot), ~1:18, ~1:45.

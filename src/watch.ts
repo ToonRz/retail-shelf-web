@@ -103,10 +103,30 @@ function invalidate(keepSnapshot = false) {
   if (!keepSnapshot) { snapshot = null; liveBoxes = null; $("watchSnapshotBox").hidden = true; }
   flow.reset();
 }
-function capture(): { context: Frame; bitmap: Promise<ImageBitmap> } {
+/**
+ * Wait (at most 300 ms) until a playing video presents a new frame, and return that frame's media time (ms).
+ * The model holds the main thread for seconds at a time; on some machines (Chrome on a Mac, hardware decoding)
+ * a playing video then keeps handing drawImage an old frame while currentTime runs on, so the model was shown a
+ * picture from a minute earlier stamped with the current time. Drawing right after the frame callback gives the
+ * pixels that are on screen, with their own timestamp.
+ */
+function presentedFrame(): Promise<number | null> {
+  const v = ui.video;
+  if (isImage || v.paused || v.ended || !("requestVideoFrameCallback" in v)) return Promise.resolve(null);
+  return new Promise((res) => {
+    let done = false;
+    const id = v.requestVideoFrameCallback((_now, meta) => { if (!done) { done = true; res(meta.mediaTime * 1000); } });
+    setTimeout(() => { if (!done) { done = true; v.cancelVideoFrameCallback(id); res(null); } }, 300);
+  });
+}
+
+async function capture(): Promise<{ context: Frame; bitmap: Promise<ImageBitmap> }> {
+  const owner = epoch; // a stop / seek while waiting for the frame makes this capture obsolete (assertCurrent)
+  const mediaTime = await presentedFrame();
   const [width, height] = frameSize();
   captureCanvas.width = width; captureCanvas.height = height;
-  const context = { id: ++frameSerial, epoch, time: now(), captured: performance.now(), detectMs: 0, detectCalls: 0, cycleMs: 0, resultAt: null, resultDelayMs: null };
+  const time = isVideoFile() && mediaTime !== null ? mediaTime : now();
+  const context = { id: ++frameSerial, epoch: owner, time, captured: performance.now(), detectMs: 0, detectCalls: 0, cycleMs: 0, resultAt: null, resultDelayMs: null };
   // Copy pixels synchronously with the timestamp; decoding the bitmap may yield.
   captureCanvas.getContext("2d")!.drawImage(media(), 0, 0, width, height);
   snapshotCanvas.width = width; snapshotCanvas.height = height;
@@ -153,6 +173,10 @@ async function detectShown(image: ImageBitmap, options: DetectOptions, step: Flo
   flow.send(step, image, options);
   try {
     assertCurrent(f);
+    // One painted frame before the model takes the main thread: the video keeps decoding and showing new
+    // frames (WASM runs on the main thread, and a round of back-to-back calls left it no gap at all).
+    await painted();
+    assertCurrent(f);
     f.detectCalls++;
     $("watchCallsRound").textContent = String(f.detectCalls);
     const started = performance.now();
@@ -183,6 +207,11 @@ const now = () => (isVideoFile() ? ui.video.currentTime * 1000 : performance.now
  * ~0.3-0.7 s per call), so without this a run of calls freezes the page: nothing repaints and clicks wait.
  */
 const breathe = () => new Promise<void>((r) => setTimeout(r, 0));
+/** After the next paint (or 50 ms when the tab is hidden and animation frames do not run). */
+const painted = () => new Promise<void>((r) => {
+  const t = setTimeout(r, 50);
+  requestAnimationFrame(() => { clearTimeout(t); setTimeout(r, 0); });
+});
 
 function saveSlots() {
   try { localStorage.setItem(SLOTS_KEY, JSON.stringify(slots)); } catch { /* private mode */ }
@@ -404,7 +433,7 @@ async function findSlots(ask = true) {
   };
   let frame: ImageBitmap | null = null;
   try {
-    const captured = capture(), f = captured.context;
+    const captured = await capture(), f = captured.context;
     detectionFrame = f;
     frame = await captured.bitmap;
     assertCurrent(f);
@@ -641,7 +670,7 @@ async function loop() {
     while (running) {
       if (isVideoFile() && (ui.video.ended || !wantsPlay || ui.video.seeking)) break;
       const cycleStarted = performance.now();
-      const captured = capture(), f = captured.context;
+      const captured = await capture(), f = captured.context;
       const method: Method = ui.method.value === "legacy" ? "legacy" : "full";
       let frame: ImageBitmap | null = null;
       flow.round(++watchRound);
