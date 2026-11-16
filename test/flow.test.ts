@@ -53,6 +53,6 @@ describe("roundVerdict", () => {
   it("the worst status leads", () => {
     expect(roundVerdict(["stocked", "out", "checking"], 0)).toMatchObject({ tone: "bad", text: "ของหมด 1 ช่อง" });
     expect(roundVerdict(["stocked", "checking"], 0)).toMatchObject({ tone: "warn", text: "ว่าง 1 ช่อง" });
-    expect(roundVerdict(["stocked", "stocked"], 1)).toMatchObject({ tone: "good", sub: "มีของ 2 · กำลังยืนยัน 0 · หมด 0 · นอกภาพ 1" });
+    expect(roundVerdict(["stocked", "stocked"], 1)).toMatchObject({ tone: "good", sub: "มีของ 2 · กำลังนับ 0 · หมด 0 · นอกภาพ 1" });
   });
 });

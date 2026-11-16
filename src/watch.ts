@@ -6,7 +6,7 @@ import { FlowView, type FlowStep } from "./flow";
 import { confirmVerdict, followVerdict, foundVerdict, nameVerdict, roundVerdict, slotVerdict, topNameConf } from "./ui/flow-logic";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
-import { autoSlots, clipRect, composeView, relView, cropLabel, endMessage, evidenceAge, fallbackCursorAfter, fitViews, frameMotion, MIN_SHARP, nextFallbackSlots, matchFrameBoxes, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
+import { autoSlots, clipRect, composeView, relView, cropLabel, endMessage, evidenceAge, fallbackCursorAfter, fitViews, frameMotion, MIN_SHARP, nextFallbackSlots, matchFrameBoxes, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, statusText, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
 
 const INTERVAL_MS = 1000;
 const MAX_FALLBACKS_PER_ROUND = 2;
@@ -186,7 +186,13 @@ function saveSlots() {
 }
 
 type DisplayStatus = Track["status"] | "unknown" | "stale" | "away";
-const STATUS_LABEL: Record<DisplayStatus, string> = { ...STATUS_TH, unknown: "ยังไม่ยืนยัน", stale: "ผลเก่า", away: "นอกภาพ" };
+// Kept short for the screen: no result yet and an old result both read "รอตรวจ" (they are told apart by colour only).
+const STATUS_LABEL: Record<DisplayStatus, string> = { ...STATUS_TH, unknown: "รอตรวจ", stale: "รอตรวจ", away: "นอกภาพ" };
+function statusLabel(s: Slot, status: DisplayStatus): string {
+  if (status !== "checking") return STATUS_LABEL[status];
+  const since = tracks.get(s.id)?.emptySince ?? null;
+  return statusText("checking", since === null ? null : now() - since, Number(ui.hold.value) * 1000);
+}
 function displayStatus(s: Slot): DisplayStatus {
   if (isAway(s)) return "away";
   const result = results.get(s.id);
@@ -256,10 +262,14 @@ function drawStage() {
     if (away) ctx.setLineDash([lw * 3, lw * 2]);
     ctx.strokeRect(x * W, y * H, w * W, h * H);
     ctx.setLineDash([]);
-    const label = away ? `${s.name} · นอกภาพ` : status === "waiting" ? s.name : `${s.name} · ${STATUS_LABEL[status]}`;
-    ctx.fillRect(x * W, y * H, ctx.measureText(label).width + 12, fs + 8);
+    const label = away ? `${s.name} · นอกภาพ` : status === "waiting" ? s.name : `${s.name} · ${statusLabel(s, status)}`;
+    // Too wide for its slot: name and status on two lines, so it does not run over the next slot's label.
+    const lines = ctx.measureText(label).width + 12 <= w * W || status === "waiting" ? [label]
+      : [s.name, away ? "นอกภาพ" : statusLabel(s, status)];
+    const bw = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 12;
+    ctx.fillRect(x * W, y * H, bw, lines.length * (fs + 4) + 4);
     ctx.fillStyle = "#fff";
-    ctx.fillText(label, x * W + 6, y * H + 4);
+    lines.forEach((l, i) => ctx.fillText(l, x * W + 6, y * H + 4 + i * (fs + 4)));
   }
   if (drag) {
     const r = dragToRect(drag.x0, drag.y0, drag.x1, drag.y1, 0);
@@ -308,7 +318,7 @@ function renderSlots() {
     input.addEventListener("change", () => { s.name = input.value.trim() || s.name; input.value = s.name; saveSlots(); drawOverlay(); });
     nameTd.append(input);
     const status = displayStatus(s);
-    const st = Object.assign(document.createElement("td"), { textContent: STATUS_LABEL[status], className: `slot-${status}` });
+    const st = Object.assign(document.createElement("td"), { textContent: statusLabel(s, status), className: `slot-${status}` });
     if (result) st.append(Object.assign(document.createElement("small"), { className: "frame-stamp", textContent: `#${result.id} · ${(result.time / 1000).toFixed(2)} s` }));
     const del = document.createElement("td");
     del.className = "num";
@@ -756,7 +766,8 @@ function updateTimeline() {
     const cell = row.children[1] as HTMLTableCellElement | undefined;
     if (s && cell) {
       const status = displayStatus(s);
-      if (cell.firstChild?.textContent !== STATUS_LABEL[status]) cell.firstChild!.textContent = STATUS_LABEL[status];
+      const label = statusLabel(s, status);
+      if (cell.firstChild?.textContent !== label) cell.firstChild!.textContent = label;
       cell.className = `slot-${status}`;
     }
   });

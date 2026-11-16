@@ -39,6 +39,11 @@ export class FlowView {
   private models = new Map<"primary" | "shelf", { card: HTMLElement; state: HTMLElement }>();
   private ctx = this.el.thumb.getContext("2d")!;
   private fit = { x: 0, y: 0, k: 1 }; // where the last picture sent was drawn on the thumbnail
+  // The last whole frame sent, as drawn on the thumbnail. A crop sent after it is shown as a box on this frame
+  // (the crop alone would replace the whole frame within a few ms, and it would look as if only crops are sent).
+  private fullThumb: HTMLCanvasElement | null = null;
+  private fullFit = { x: 0, y: 0, k: 1, w: 0, h: 0 };
+  private cropOn: { x: number; y: number; kx: number; ky: number } | null = null; // crop pixels -> thumbnail
   private agent: Agent | null = null;
   private calls = 0;
   private phase: Phase | null = null;
@@ -106,6 +111,8 @@ export class FlowView {
     this.phase = null;
     this.renderPhases(null, -1);
     this.el.round.textContent = "";
+    this.fullThumb = null;
+    this.cropOn = null;
     this.clearThumb();
     this.el.target.textContent = "—";
     this.el.call.textContent = "detect()";
@@ -122,8 +129,8 @@ export class FlowView {
     this.el.kicker.textContent = "Agent กำลัง";
     this.el.title.textContent = step.title;
     this.renderPhases(step.phase, step.step);
-    this.drawThumb(image);
-    this.el.target.textContent = `${step.target} · ${image.width}×${image.height} px`;
+    const onFull = this.drawThumb(image, step);
+    this.el.target.textContent = `${step.target}${onFull ? " (กรอบส้มในภาพเต็ม)" : ""} · ${image.width}×${image.height} px`;
     const used = modelsUsed(options.shelfOnly, !!this.agent?.manifest.shelfModel);
     this.el.call.textContent = `${step.full ? "ภาพเต็ม" : "ครอป"}${options.shelfOnly ? " · shelfOnly" : ""}`;
     this.el.reply.textContent = "…";
@@ -221,23 +228,53 @@ export class FlowView {
     this.ctx.fillRect(0, 0, THUMB_W, THUMB_H);
   }
 
-  private drawThumb(image: ImageBitmap) {
+  /** Draws the picture sent. A crop with a known place on the last whole frame is drawn as that frame with the
+   *  crop boxed and the rest dimmed; returns true then. */
+  private drawThumb(image: ImageBitmap, step: FlowStep): boolean {
     this.clearThumb();
+    this.cropOn = null;
+    if (!step.full && step.area && this.fullThumb) {
+      const { x, y, w, h } = this.fullFit;
+      this.ctx.drawImage(this.fullThumb, 0, 0);
+      const [ax, ay, aw, ah] = step.area;
+      const rx = x + ax * w, ry = y + ay * h, rw = Math.max(2, aw * w), rh = Math.max(2, ah * h);
+      this.ctx.save();
+      this.ctx.fillStyle = "rgba(13, 15, 19, 0.55)";
+      this.ctx.beginPath();
+      this.ctx.rect(0, 0, THUMB_W, THUMB_H);
+      this.ctx.rect(rx, ry, rw, rh);
+      this.ctx.fill("evenodd");
+      this.ctx.lineWidth = 2;
+      this.ctx.strokeStyle = "#ffb020";
+      this.ctx.strokeRect(rx, ry, rw, rh);
+      this.ctx.restore();
+      this.cropOn = { x: rx, y: ry, kx: rw / image.width, ky: rh / image.height };
+      return true;
+    }
     const k = Math.min(THUMB_W / image.width, THUMB_H / image.height);
     const w = image.width * k, h = image.height * k;
     this.fit = { x: (THUMB_W - w) / 2, y: (THUMB_H - h) / 2, k };
     this.ctx.drawImage(image, this.fit.x, this.fit.y, w, h);
+    if (step.full) {
+      this.fullThumb ??= Object.assign(document.createElement("canvas"), { width: THUMB_W, height: THUMB_H });
+      const c = this.fullThumb.getContext("2d")!;
+      c.clearRect(0, 0, THUMB_W, THUMB_H);
+      c.drawImage(this.el.thumb, 0, 0);
+      this.fullFit = { x: this.fit.x, y: this.fit.y, k, w, h };
+    }
+    return false;
   }
 
   /** Boxes of the 110-class model in blue, boxes of the shelf model in green, on the picture that was sent. */
   private drawBoxes(r: DetectResult) {
     const classes = this.agent?.manifest.model.classes ?? Infinity;
-    const { x, y } = this.fit, k = Math.min(THUMB_W / r.width, THUMB_H / r.height);
+    const k = Math.min(THUMB_W / r.width, THUMB_H / r.height);
+    const map = this.cropOn ?? { x: this.fit.x, y: this.fit.y, kx: k, ky: k };
     this.ctx.lineWidth = 2;
     for (const b of r.boxes) {
       const [x1, y1, x2, y2] = b.xyxy;
       this.ctx.strokeStyle = b.classId < classes ? "#6c9bff" : "#3ccf7a";
-      this.ctx.strokeRect(x + x1 * k, y + y1 * k, (x2 - x1) * k, (y2 - y1) * k);
+      this.ctx.strokeRect(map.x + x1 * map.kx, map.y + y1 * map.ky, (x2 - x1) * map.kx, (y2 - y1) * map.ky);
     }
   }
 

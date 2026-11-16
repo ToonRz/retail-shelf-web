@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Box } from "../src/agent-contract";
-import { autoSlots, cropLabel, clipRect, cropRect, dragToRect, composeView, endMessage, evidenceAge, fallbackCursorAfter, fitView, fitViews, frameMotion, type Gray, pinView, IDENTITY, refineView, mapRect, matchFrameBoxes, nextFallbackSlots, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME, type Slot } from "../src/ui/watch-logic";
+import { autoSlots, cropLabel, clipRect, cropRect, dragToRect, composeView, endMessage, evidenceAge, fallbackCursorAfter, fitView, fitViews, frameMotion, type Gray, pinView, IDENTITY, refineView, mapRect, matchFrameBoxes, nextFallbackSlots, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, statusText, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME, type Slot } from "../src/ui/watch-logic";
 
 const cfg = { holdMs: 10_000, clearMs: 3_000 };
 const box = (x1: number, y1: number, x2: number, y2: number): Box => ({ cls: "product", classId: 0, conf: 0.9, xyxy: [x1, y1, x2, y2] });
@@ -403,5 +403,18 @@ describe("refineView", () => {
   it("finds no clear match on a picture of something else", () => {
     const other: Gray = { w: 128, h: 96, px: Uint8Array.from({ length: 128 * 96 }, (_, i) => (i * 7919) % 251) };
     expect(refineView(render(IDENTITY), other, [IDENTITY]).sharp).toBeLessThan(0.03);
+  });
+});
+
+describe("statusText", () => {
+  it("counts an empty slot up to the hold time", () => {
+    expect(statusText("checking", 7400, 15000)).toBe("ว่าง 7/15 วิ");
+    expect(statusText("checking", 99000, 15000)).toBe("ว่าง 15/15 วิ");
+    expect(statusText("checking", -50, 15000)).toBe("ว่าง 0/15 วิ");
+  });
+  it("uses the plain word for every other status", () => {
+    expect(statusText("stocked", null, 15000)).toBe("มีของ");
+    expect(statusText("out", 20000, 15000)).toBe("ของหมด");
+    expect(statusText("checking", null, 15000)).toBe("ว่าง");
   });
 });

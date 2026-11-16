@@ -209,7 +209,13 @@ export function endMessage(slots: Slot[], tracks: Map<string, Track>, holdSec: n
   return pending.length ? `วิดีโอจบแล้ว · ${pending.join(", ")} ว่างยังไม่ถึง ${holdSec} วินาทีจึงยังไม่เตือน` : "วิดีโอจบแล้ว";
 }
 
-export const STATUS_TH: Record<SlotStatus, string> = { waiting: "รอตรวจ", stocked: "มีของ", checking: "กำลังยืนยัน", out: "ของหมด" };
+export const STATUS_TH: Record<SlotStatus, string> = { waiting: "รอตรวจ", stocked: "มีของ", checking: "ว่าง", out: "ของหมด" };
+
+/** A slot's status in a few words. An empty slot that has not alerted yet shows its count, e.g. "ว่าง 7/15 วิ". */
+export function statusText(status: SlotStatus, emptyMs: number | null, holdMs: number): string {
+  if (status !== "checking" || emptyMs === null) return STATUS_TH[status];
+  return `ว่าง ${Math.min(Math.floor(Math.max(0, emptyMs) / 1000), Math.round(holdMs / 1000))}/${Math.round(holdMs / 1000)} วิ`;
+}
 
 // ---------------------------------------------------------------- follow the view (camera zoom / pan)
 
