@@ -4,7 +4,7 @@
 import type { Agent, Backend } from "./agent-contract";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
-import { autoSlots, clipRect, cropLabel, endMessage, fitViews, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
+import { autoSlots, clipRect, composeView, relView, cropLabel, endMessage, fitViews, frameMotion, MIN_SHARP, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
 
 const INTERVAL_MS = 1000;
 const CLEAR_MS = 3000;
@@ -15,7 +15,7 @@ const NAME_CONF = 0.5;  // a name from a crop below this is more often wrong tha
 const MAX_NAME_CROPS = 60; // products named one by one on a crop (~0.3-0.7 s each on WASM)
 const NAME_PADS = [0.15, 0.4]; // crop around a product box, grown by this much of its size on each side
 const GRAY_W = 128, GRAY_H = 96; // the small copy of each frame the view is matched on
-const MIN_SHARP = 0.03;   // refineView best stands out from its neighbours less than this: no clear match (lost)
+const LOST_REFIT = 2;     // rounds in a row without a clear move from the last frame before trying the reference alone
 const MIN_VISIBLE = 0.4;   // a slot with less of it inside the frame (zoomed in) is not judged: its timers pause
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -47,7 +47,8 @@ let refBoxes: NBox[] | null = null;
 let refGray: Gray | null = null;
 let view: View = IDENTITY;
 let lost = 0; // rounds in a row the view could not be found
-const resetView = () => { refBoxes = refGray = null; view = IDENTITY; lost = 0; };
+let last: { gray: Gray; boxes: NBox[] } | null = null; // the frame of the last round the view was found on
+const resetView = () => { refBoxes = refGray = null; last = null; view = IDENTITY; lost = 0; };
 const grayCtx = Object.assign(document.createElement("canvas"), { width: GRAY_W, height: GRAY_H }).getContext("2d", { willReadFrequently: true })!;
 const slotRect = (s: Slot) => mapRect(s.rect, view);
 const isAway = (s: Slot) => visibleFraction(slotRect(s)) < MIN_VISIBLE; // zoomed / panned out of the frame
@@ -329,8 +330,12 @@ async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdM
 }
 
 /**
- * Where the reference frame is in this frame now (zoom + pan): rough guesses from the product boxes the shelf model
- * sees on the whole frame (fitViews), pinned down and chosen by matching a small grayscale copy of both frames (refineView).
+ * Where the reference frame is in this frame now (zoom + pan). Each round first measures how the frame moved since
+ * the last round (frameMotion, trying the moves the boxes of the last frame and of the reference allow): not at all =
+ * the view stays as it is (taking products away can never move the frames); a move = the last view carried over by
+ * it, pinned to the reference close by (pinView). Only when the move
+ * is unclear for a few rounds in a row is the reference searched alone: every view the product boxes allow
+ * (fitViews), the pictures pick one (refineView).
  */
 async function followView(frame: ImageBitmap, conf: number): Promise<number> {
   const r = await agent!.detect(frame, { conf, shelfOnly: true });
@@ -339,12 +344,20 @@ async function followView(frame: ImageBitmap, conf: number): Promise<number> {
   const gray: Gray = { w: GRAY_W, h: GRAY_H, px: toGray(grayCtx.getImageData(0, 0, GRAY_W, GRAY_H).data) };
   if (!refBoxes || !refGray) {
     refBoxes = boxes; refGray = gray; view = IDENTITY; lost = 0;
+    last = { gray, boxes };
   } else {
-    // every view the boxes allow (a shelf of equal-sized products in a grid can fit one column off), then the pictures pick one
-    const starts = [...fitViews(refBoxes, boxes, view).map((f) => f.view), view];
+    // moves from the boxes of the last frame, and those implied by the reference (fitViews) given the current view
+    const viaRef = fitViews(refBoxes, boxes, view).map((f) => relView(f.view, view));
+    const mv = last ? frameMotion(last.gray, gray, last.boxes, boxes, viaRef) : null;
     await breathe();
-    const m = refineView(refGray, gray, starts);
-    if (m.sharp >= MIN_SHARP) { view = m.view; lost = 0; } else lost++; // keep the last view
+    if (mv) {
+      if (!mv.still) view = pinView(refGray, gray, composeView(mv.view, view));
+      lost = 0;
+      last = { gray, boxes };
+    } else if (++lost >= LOST_REFIT) {
+      const m = refineView(refGray, gray, [...fitViews(refBoxes, boxes, view).map((f) => f.view), view]);
+      if (m.sharp >= MIN_SHARP) { view = m.view; lost = 0; last = { gray, boxes }; }
+    }
   }
   setStatus(watchStatus());
   return r.latency_ms;

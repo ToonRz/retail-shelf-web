@@ -365,7 +365,8 @@ const CAP = 1; // a pixel that differs by more than this (in spreads) costs no m
 
 /**
  * How well the reference picture, put where `v` says, matches the current one: 1 - mean capped difference over the
- * pixels both share (higher is better), or -1 when they share less than half of the current frame. Brightness is
+ * pixels both share (higher is better), or -1 when they share less than half of the most they could (the whole
+ * current frame, or all of the reference when it is smaller in it, as after zooming out from it). Brightness is
  * brought to mean 0, spread 1 over the shared pixels only (so a camera that adjusts its exposure still matches): over
  * the whole pictures, the dark wall around a shelf seen whole would make the same shelf look brighter in the
  * reference than in a zoomed frame that is all shelf, and the best match would land beside the truth.
@@ -391,7 +392,7 @@ export function viewScore(ref: Gray, cur: Gray, v: View): number {
       n++; sr += a; srr += a * a; sc += b; scc += b * b;
     }
   }
-  if (n < (cur.w * cur.h) / 2) return -1;
+  if (n < (Math.min(1, v.s * v.s) * cur.w * cur.h) / 2) return -1; // less than half of the most they can share
   const mr = sr / n, mc = sc / n;
   const kr = 1 / (Math.sqrt(Math.max(0, srr / n - mr * mr)) || 1), kc = 1 / (Math.sqrt(Math.max(0, scc / n - mc * mc)) || 1);
   let cost = 0;
@@ -446,4 +447,51 @@ export function refineView(ref: Gray, cur: Gray, starts: View[]): { view: View; 
     if (fine.score > best.score) best = { view: fine.view, score: fine.score, sharp: coarse.sharp };
   }
   return best;
+}
+
+// ---------------------------------------------------------------- follow the view from round to round
+
+/** The view `v` (reference -> last frame) followed by `d` (last frame -> this frame): reference -> this frame. */
+export const composeView = (d: View, v: View): View => ({ s: d.s * v.s, tx: d.s * v.tx + d.tx, ty: d.s * v.ty + d.ty });
+
+export const MIN_SHARP = 0.03; // the best view stands out from its neighbours less than this: no clear match
+const STILL_SCORE = 0.01;      // the frame counts as not moved when "not moved" scores within this of the best move
+
+/** The move `d` from the last frame to this one that takes view `v` (reference -> last frame) to `c` (reference -> this frame). */
+export const relView = (c: View, v: View): View => {
+  const s = c.s / v.s;
+  return { s, tx: c.tx - s * v.tx, ty: c.ty - s * v.ty };
+};
+
+/**
+ * How the frame moved since the last round (zoom + pan, as a View from the last frame to this one), or null when
+ * that is not clear (someone in front of the camera, the picture changed too much). The last frame is the best
+ * thing to compare with: it already lacks the products taken away since the reference, so once most of a shelf is
+ * empty (bare pegboard that looks the same one slot to the side) it still tells the move where the reference
+ * cannot. Moves are tried from the product boxes of both frames, plus `extra` (moves implied by matching this frame
+ * to the reference: after a pan across bare slots the two frames may share no product at all, while the reference
+ * still has the products that came into view). `still` = the camera did not move: the view must stay exactly as it is.
+ */
+export function frameMotion(last: Gray, cur: Gray, lastBoxes: NBox[], boxes: NBox[], extra: View[] = []): { view: View; still: boolean } | null {
+  const starts = [...fitViews(lastBoxes, boxes, IDENTITY).map((f) => f.view), ...extra.filter((v) => v.s >= FOLLOW_ZOOM[0] && v.s <= FOLLOW_ZOOM[1]), IDENTITY];
+  const m = refineView(last, cur, starts);
+  if (m.sharp < MIN_SHARP) return null;
+  const still = viewScore(last, cur, IDENTITY) >= m.score - STILL_SCORE;
+  return { view: still ? IDENTITY : m.view, still };
+}
+
+const PIN_MAX = { s: 0.06, t: 0.04 }; // the most a pin may move a carried view (relative zoom, pan)
+
+/**
+ * Pin a view carried over from the last round to the reference picture, so that the small error of each measured
+ * move (a few %) is corrected instead of adding up. The carried view is close to right (it comes from the last frame),
+ * while the reference can mislead once most products are gone (the bare wall of the slots matches other bare wall),
+ * so the pin may only move it a little: a search well within one product, and anything further is not taken.
+ */
+export function pinView(ref: Gray, cur: Gray, v: View): View {
+  const near = (w: View) => Math.abs(w.s / v.s - 1) <= PIN_MAX.s && Math.abs(w.tx - v.tx) <= PIN_MAX.t && Math.abs(w.ty - v.ty) <= PIN_MAX.t;
+  const m = refineView(ref, cur, [v]);
+  const start = m.sharp >= MIN_SHARP && near(m.view) ? m.view : bestAround(ref, cur, v, 0.02, 0.01, 0.01, 0.005).view;
+  const fine = bestAround(ref, cur, start, 0.01, 0.0025, 0.005, 0.0025).view;
+  return near(fine) ? fine : v;
 }
