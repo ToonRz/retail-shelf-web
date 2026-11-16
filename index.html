@@ -48,7 +48,7 @@
 
     /* workbench: photo first, tally beside it, shelf-edge tray under it */
     .bench { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "status" "stage" "tray" "rail" "engine"; }
-    #pageWatch.bench { grid-template-areas: "status" "stage" "flow" "tray" "rail"; }
+    #pageWatch.bench { grid-template-areas: "status" "stage" "tray" "flow" "rail"; }
     .stage { grid-area: stage; position: relative; width: 100%; aspect-ratio: 1; max-height: 64dvh; background: var(--stage); overflow: hidden; --accent: var(--stage-accent); }
     .stage canvas, .stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
     .stage.over { outline: 2px dashed var(--stage-accent); outline-offset: -10px; }
@@ -114,6 +114,14 @@
     .swatch { display: inline-block; width: 6px; height: 18px; margin-right: 10px; border-radius: 1px; vertical-align: middle; }
 
     /* shelf watch */
+    .watch-transport { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; width: 100%; }
+    .watch-transport input { flex: 1 1 180px; min-width: 100px; min-height: 44px; }
+    .watch-transport button, .watch-transport select { min-height: 44px; }
+    #watchSnapshot { display: block; width: 100%; max-height: 320px; object-fit: contain; background: #0d0f13; }
+    .frame-stamp { display: block; font-size: 11px; font-weight: 400; color: var(--muted); }
+    #watchSnapshotBox { margin: 0; width: 100%; }
+    #watchFrameInfo { padding: 8px 16px; font-variant-numeric: tabular-nums; }
+
     #watchOverlay { touch-action: none; }
     #watchImage { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
     #watchOverlay.drawable { cursor: crosshair; }
@@ -282,7 +290,7 @@
       .status-bar { display: flex; align-items: center; border-top: 1px solid var(--line); border-bottom: 0; }
       .status-bar progress { inset: -1px 0 auto; }
       .engine { border-left: 1px solid var(--line); }
-      #pageWatch.bench { grid-template-rows: minmax(0, 1fr) auto auto auto; grid-template-areas: "stage rail" "flow rail" "tray rail" "status engine"; }
+      #pageWatch.bench { grid-template-rows: minmax(0, 1fr) auto auto auto; grid-template-areas: "stage rail" "tray rail" "flow rail" "status engine"; }
     }
   </style>
 </head>
@@ -381,6 +389,12 @@
     </div>
 
     <div class="tray">
+      <div id="watchTransport" class="watch-transport" hidden aria-label="ควบคุมวิดีโอ">
+        <button id="watchPlay" class="btn ghost" type="button">เล่น</button>
+        <input id="watchSeek" type="range" min="0" max="0" step="0.01" value="0" aria-label="เวลาวิดีโอ">
+        <output id="watchTime">0:00 / 0:00</output>
+        <label>ความเร็ว <select id="watchSpeed" aria-label="ความเร็วเล่น"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>
+      </div>
       <div class="actions">
         <button class="btn ghost" id="watchCamBtn" type="button" disabled>เปิดกล้อง</button>
         <button class="btn ghost" id="watchFileBtn" type="button" disabled>เลือกรูป / วิดีโอ</button>
@@ -410,7 +424,7 @@
         <p class="flow-now"><span class="flow-kicker" id="flowKicker">Agent</span><span class="flow-title" id="flowTitle">กำลังโหลด model…</span></p>
         <ol class="flow-phases" id="flowPhases"></ol>
         <span class="flow-round" id="flowRound"></span>
-        <label class="flow-slow" title="ค้างแต่ละขั้นไว้บนจอนานขึ้น ให้อธิบายได้ทัน (การตรวจจริงไม่เปลี่ยน)"><input id="flowSlow" type="checkbox"> โหมดนำเสนอ (ช้าลง)</label>
+        <label class="flow-slow" title="พักไฟล์วิดีโอระหว่างแสดงขั้นตอนของภาพเดียวกัน กล้องสดยังเล่นต่อ"><input id="flowSlow" type="checkbox"> โหมดนำเสนอ (ช้าลง)</label>
       </div>
       <div class="flow-body">
         <figure class="flow-card flow-input">
@@ -452,11 +466,13 @@
     </section>
 
     <aside class="rail" aria-label="สถานะชั้นวาง">
+      <figure id="watchSnapshotBox" hidden><figcaption id="watchFrameInfo"></figcaption><canvas id="watchSnapshot" aria-label="ภาพ snapshot ที่ agent กำลังตรวจ พร้อมกรอบผลตรวจ"></canvas></figure>
+
       <div class="alert-banner" id="watchBanner" role="alert" hidden></div>
       <div class="tally">
         <h2>สถานะชั้นวาง</h2>
         <div class="total"><b id="watchOutCount">0</b><span>ช่องที่ของหมด</span></div>
-        <div class="stats"><span><b id="watchLatency">–</b> ms ต่อรอบ</span></div>
+        <div class="stats"><span><b id="watchLatency">–</b> ms detect() รวม</span><span><b id="watchRoundLatency">–</b> ms ทั้งรอบ (รวมรอ/นำเสนอ)</span></div>
       </div>
       <div class="list">
         <table>

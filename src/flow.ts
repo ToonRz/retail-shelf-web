@@ -111,6 +111,10 @@ export class FlowView {
 
   /** A new source: forget the last picture and answer. */
   reset() {
+    this.lastResult = null;
+    this.el.log.replaceChildren();
+    this.el.json.textContent = "–";
+    this.idle("รอภาพ", "รอรอบตรวจถัดไป");
     this.phase = null;
     this.renderPhases(null, -1);
     this.el.round.textContent = "";
@@ -143,9 +147,9 @@ export class FlowView {
   }
 
   /** The agent answered: its boxes go on the picture, the models report their time. */
-  reply(result: DetectResult, options: DetectOptions) {
+  reply(result: DetectResult, options: DetectOptions, frame?: { id: number; time: number }) {
     this.lastResult = result;
-    this.log(result, options);
+    this.log(result, options, frame);
     if (!this.shown) return;
     const used = modelsUsed(options.shelfOnly, !!this.agent?.manifest.shelfModel);
     this.setModels(used, `✓ ${Math.round(result.latency_ms)} ms`, true);
@@ -284,11 +288,11 @@ export class FlowView {
     dot.animate([{ transform: "translateX(0)", opacity: 0 }, { opacity: 1, offset: 0.15 }, { opacity: 1, offset: 0.85 }, { transform: "translateX(100%)", opacity: 0 }], { duration: 420, easing: "ease-in-out" });
   }
 
-  private log(r: DetectResult, options: DetectOptions) {
+  private log(r: DetectResult, options: DetectOptions, frame?: { id: number; time: number }) {
     this.calls++;
     const li = document.createElement("li");
     const opts = JSON.stringify({ conf: options.conf, ...(options.shelfOnly ? { shelfOnly: true } : {}) });
-    li.textContent = `#${this.calls} detect(${r.width}×${r.height}, ${opts}) → ${r.boxes.length} box · ${Math.round(r.latency_ms)} ms · ${r.backend}`;
+    li.textContent = `#${this.calls}${frame ? ` [frame ${frame.id} @ ${(frame.time / 1000).toFixed(2)} s]` : ""} detect(${r.width}×${r.height}, ${opts}) → ${r.boxes.length} box · ${Math.round(r.latency_ms)} ms · ${r.backend}`;
     li.title = `model_sha256 ${r.model_sha256}`;
     this.el.log.querySelector(".muted")?.remove();
     this.el.log.prepend(li);
