@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Box } from "../src/agent-contract";
-import { autoSlots, cropLabel, clipRect, cropRect, dragToRect, endMessage, fitView, fitViews, type Gray, IDENTITY, refineView, mapRect, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME } from "../src/ui/watch-logic";
+import { autoSlots, cropLabel, clipRect, cropRect, dragToRect, composeView, endMessage, fitView, fitViews, frameMotion, type Gray, pinView, IDENTITY, refineView, mapRect, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME } from "../src/ui/watch-logic";
 
 const cfg = { holdMs: 10_000, clearMs: 3_000 };
 const box = (x1: number, y1: number, x2: number, y2: number): Box => ({ cls: "product", classId: 0, conf: 0.9, xyxy: [x1, y1, x2, y2] });
@@ -233,17 +233,18 @@ describe("refineView", () => {
   // of different shades; outside it the camera sees a dark wall
   const products: Array<[number, number, number, number, number]> = [[0.05, 0.05, 0.3, 0.45, 60], [0.38, 0.1, 0.62, 0.45, 200], [0.7, 0.05, 0.95, 0.42, 90],
     [0.08, 0.55, 0.28, 0.95, 160], [0.4, 0.52, 0.65, 0.93, 40], [0.72, 0.58, 0.93, 0.95, 230]];
+  let gone: number[] = []; // products taken away from the scene (the back wall shows)
   const scene = (u: number, v: number) => {
     if (u < 0 || u > 1 || v < 0 || v > 1) return 30;
-    const p = products.find(([a, b, c, d]) => u >= a && u <= c && v >= b && v <= d);
+    const p = products.find(([a, b, c, d], i) => !gone.includes(i) && u >= a && u <= c && v >= b && v <= d);
     if (p) return p[4] + 20 * Math.sin(40 * u) * Math.sin(30 * v); // print on the pack
     return (v > 0.46 && v < 0.5) || v > 0.96 ? 245 : 150 + 10 * Math.sin(60 * u);
   };
-  const render = (view: { s: number; tx: number; ty: number }, hole?: [number, number, number, number]): Gray => {
+  const render = (view: { s: number; tx: number; ty: number }, ...holes: Array<[number, number, number, number]>): Gray => {
     const w = 128, h = 96, px = new Uint8Array(w * h);
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const fx = (x + 0.5) / w, fy = (y + 0.5) / h;
-      const inHole = hole && fx >= hole[0] && fx <= hole[2] && fy >= hole[1] && fy <= hole[3];
+      const inHole = holes.some((hole) => fx >= hole[0] && fx <= hole[2] && fy >= hole[1] && fy <= hole[3]);
       px[y * w + x] = inHole ? 200 : Math.max(0, Math.min(255, Math.round(scene((fx - view.tx) / view.s, (fy - view.ty) / view.s))));
     }
     return { w, h, px };
@@ -269,6 +270,43 @@ describe("refineView", () => {
     expect(Math.abs(r.view.s - at(truth).s)).toBeLessThan(0.03);
     expect(Math.abs(r.view.tx - at(truth).tx)).toBeLessThan(0.015);
     expect(Math.abs(r.view.ty - at(truth).ty)).toBeLessThan(0.015);
+  });
+
+  it("measures how the frame moved since the last round, and calls a frame with a product taken away still", () => {
+    const last = { s: 1.2, tx: -0.1, ty: -0.1 }, now = { s: 1.3, tx: -0.17, ty: -0.12 };
+    const mv = frameMotion(render(last), render(now), [], [])!;
+    const v = composeView(mv.view, last);
+    expect(mv.still).toBe(false);
+    expect(Math.abs(v.s - now.s)).toBeLessThan(0.02);
+    expect(Math.abs(v.tx - now.tx)).toBeLessThan(0.01);
+    expect(Math.abs(v.ty - now.ty)).toBeLessThan(0.01);
+    expect(frameMotion(render(now), render(now, [0.3, 0.5, 0.6, 0.95]), [], [])).toEqual({ view: IDENTITY, still: true });
+  });
+
+  it("measures a big zoom out, where the last frame covers under half of this one", () => {
+    const last = { s: 1.5, tx: -0.3, ty: -0.25 };
+    const mv = frameMotion(render(last), render(IDENTITY), [], [], [{ s: 1 / 1.5, tx: 0.2, ty: 0.17 }])!;
+    const v = composeView(mv.view, last);
+    expect(Math.abs(v.s - 1)).toBeLessThan(0.02);
+    expect(Math.abs(v.tx)).toBeLessThan(0.01);
+    expect(Math.abs(v.ty)).toBeLessThan(0.01);
+  });
+
+  it("composes views like mapping a rect twice", () => {
+    const a = { s: 1.2, tx: -0.1, ty: 0.05 }, b = { s: 0.9, tx: 0.03, ty: -0.02 }, r: [number, number, number, number] = [0.2, 0.3, 0.1, 0.2];
+    expect(mapRect(r, composeView(b, a)).map((n) => +n.toFixed(9))).toEqual(mapRect(mapRect(r, a), b).map((n) => +n.toFixed(9)));
+  });
+
+  it("pins a carried view to the reference without sliding off when most products are gone", () => {
+    const truth = { s: 1.3, tx: -0.15, ty: -0.135 };
+    const ref = render(IDENTITY);
+    gone = [0, 1, 3, 4, 5]; // only the top right product is left
+    const cur = render(truth);
+    gone = [];
+    const v = pinView(ref, cur, { s: 1.32, tx: -0.16, ty: -0.13 });
+    expect(Math.abs(v.s - truth.s)).toBeLessThan(0.02);
+    expect(Math.abs(v.tx - truth.tx)).toBeLessThan(0.01);
+    expect(Math.abs(v.ty - truth.ty)).toBeLessThan(0.01);
   });
 
   it("finds no clear match on a picture of something else", () => {
