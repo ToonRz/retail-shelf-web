@@ -9,7 +9,9 @@ import { errorMessage, formatMB } from "./ui/logic";
 import { autoSlots, clipRect, composeView, relView, cropLabel, endMessage, evidenceAge, fallbackCursorAfter, fitViews, frameMotion, MIN_SHARP, nextFallbackSlots, matchFrameBoxes, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, statusText, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
 
 const INTERVAL_MS = 1000;
-const MAX_FALLBACKS_PER_ROUND = 2;
+// Crops of the slots the full frame left unclear are bounded by time only. A fixed 2 per round left an empty slot
+// unseen for 6-9 s on a shelf of 18 slots (alerts came that much late, and one "blocked" look paused the timer for
+// the whole gap) while a crop takes ~30 ms on WebGPU. On WASM (~0.3-0.7 s a crop) the budget still stops at 2-3.
 const FALLBACK_BUDGET_MS = 900;
 // A slot not looked at for this long restarts its empty timer. Rounds on a slow device (WASM, many slots) or the
 // round-robin crop queue can leave several seconds between looks at one slot, so this must stay well above that:
@@ -654,7 +656,7 @@ async function loop() {
             else if (matches.matched.has(s.id)) recordSlot(s, true, state.blocked, cfg, f);
             else uncertain.add(s.id);
           }
-          const batch = nextFallbackSlots(slots, uncertain, fallbackCursor, MAX_FALLBACKS_PER_ROUND);
+          const batch = nextFallbackSlots(slots, uncertain, fallbackCursor, slots.length);
           const fallbackStarted = performance.now();
           const processed: Slot[] = [];
           for (const [k, s] of batch.slots.entries()) {
