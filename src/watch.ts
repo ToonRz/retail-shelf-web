@@ -57,6 +57,10 @@ let frameSerial = 0;
 let active: Frame | null = null;
 let snapshot: Frame | null = null;
 let snapshotBoxes: DetectResult["boxes"] = [];
+// The last finished full-frame answer, drawn over the live video until a newer one comes back. Kept apart from
+// snapshotBoxes, which empties at every capture, so the boxes on the video do not blink off each round.
+let liveBoxes: { boxes: DetectResult["boxes"]; frame: Frame } | null = null;
+const LIVE_BOX_MAX_MS = 2500; // older than this (clip time, or real time for a camera) = not drawn on the video
 let fallbackCursor = 0;
 const results = new Map<string, Frame>();
 type Method = "full" | "legacy";
@@ -93,7 +97,7 @@ function renderComparison() {
 }
 function invalidate(keepSnapshot = false) {
   epoch++; active = null;
-  if (!keepSnapshot) { snapshot = null; $("watchSnapshotBox").hidden = true; }
+  if (!keepSnapshot) { snapshot = null; liveBoxes = null; $("watchSnapshotBox").hidden = true; }
   flow.reset();
 }
 function capture(): { context: Frame; bitmap: Promise<ImageBitmap> } {
@@ -133,7 +137,7 @@ const setStatus = (text: string, bad = false) => { ui.status.textContent = text;
 /** Where a part of the frame (fractions) is drawn on the stage, in its pixels (the media is fitted with object-fit: contain). */
 function onStage([x, y, w, h]: Rect): Rect | null {
   const [W, H] = frameSize(), sw = ui.stage.clientWidth, sh = ui.stage.clientHeight;
-  if (!isImage || !W || !H || !sw || !sh || ui.overlay.hidden) return null;
+  if (!W || !H || !sw || !sh || ui.overlay.hidden) return null;
   const k = Math.min(sw / W, sh / H), ox = (sw - W * k) / 2, oy = (sh - H * k) / 2;
   return [ox + x * W * k, oy + y * H * k, w * W * k, h * H * k];
 }
@@ -197,20 +201,54 @@ const staleMs = () => Math.max(5000, Number(ui.hold.value) * 1000);
 
 // ---------------------------------------------------------------- draw
 
+const COLOR = { waiting: "#9aa1ad", stocked: "#2fa45a", checking: "#e0a100", out: "#e03b3b", unknown: "#9aa1ad", stale: "#8992a2", away: "#9aa1ad" };
+
+/** How far the last finished answer is behind the picture on screen (ms), or null when it is too old to draw. */
+function liveLag(f: Frame): number | null {
+  if (f.resultAt === null) return null;
+  const lag = isVideoFile() ? Math.abs(ui.video.currentTime * 1000 - f.time) : isImage ? 0 : performance.now() - f.captured;
+  return lag <= LIVE_BOX_MAX_MS ? lag : null;
+}
+
 function drawOverlay() {
+  drawStage();
+  drawSnapshot();
+}
+
+/**
+ * The live picture: every slot with its status, plus the product boxes of the last finished full-frame answer.
+ * On a playing video those are up to one round old, so the frame and its lag are printed in the corner.
+ */
+function drawStage() {
   const c = ui.overlay, [W, H] = frameSize();
   if (!W) return;
   if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
   const ctx = c.getContext("2d")!;
   ctx.clearRect(0, 0, W, H);
   const lw = Math.max(3, W / 300), fs = Math.max(14, W / 50);
-  ctx.lineWidth = lw;
   ctx.font = `600 ${fs}px system-ui, sans-serif`;
   ctx.textBaseline = "top";
-  const COLOR = { waiting: "#9aa1ad", stocked: "#2fa45a", checking: "#e0a100", out: "#e03b3b", unknown: "#9aa1ad", stale: "#8992a2", away: "#9aa1ad" };
+  const lag = liveBoxes ? liveLag(liveBoxes.frame) : null;
+  if (liveBoxes && lag !== null) {
+    ctx.lineWidth = Math.max(2, lw / 2);
+    ctx.strokeStyle = "rgba(60, 207, 122, 0.9)";
+    for (const b of liveBoxes.boxes) {
+      const [x1, y1, x2, y2] = b.xyxy;
+      if (x2 > x1 && y2 > y1) ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    }
+    if (!isImage) {
+      const f = liveBoxes.frame;
+      const tag = `ผลจากภาพ #${f.id} · ${isVideoFile() ? `${(f.time / 1000).toFixed(1)} s · ` : ""}ช้ากว่าภาพ ${(lag / 1000).toFixed(1)} s`;
+      const tw = ctx.measureText(tag).width + 16;
+      ctx.fillStyle = "rgba(13, 15, 19, 0.72)";
+      ctx.fillRect(W - tw - 8, H - fs - 20, tw, fs + 12);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(tag, W - tw, H - fs - 14);
+    }
+  }
+  ctx.lineWidth = lw;
   for (const s of slots) {
-    if (!isImage && (running || finding || (isVideoFile() && !ui.video.paused))) continue;
-    const rect = slotRect(s), status = isImage ? displayStatus(s) : "waiting";
+    const rect = slotRect(s), status = displayStatus(s);
     const away = isAway(s);
     const [x, y, w, h] = away ? clipRect(rect) : rect;
     if (w <= 0 || h <= 0) continue;
@@ -223,7 +261,17 @@ function drawOverlay() {
     ctx.fillStyle = "#fff";
     ctx.fillText(label, x * W + 6, y * H + 4);
   }
-  if (snapshot) {
+  if (drag) {
+    const r = dragToRect(drag.x0, drag.y0, drag.x1, drag.y1, 0);
+    if (r) { ctx.strokeStyle = "#6c9bff"; ctx.setLineDash([lw * 3, lw * 2]); ctx.strokeRect(r[0] * W, r[1] * H, r[2] * W, r[3] * H); ctx.setLineDash([]); }
+  }
+}
+
+/** The frame the agent is (or was last) working on, with the boxes it returned. */
+function drawSnapshot() {
+  const [W, H] = [captureCanvas.width, captureCanvas.height];
+  if (snapshot && W) {
+    const lw = Math.max(3, W / 300), fs = Math.max(14, W / 50);
     const sc = snapshotCanvas.getContext("2d")!;
     sc.clearRect(0, 0, W, H); sc.drawImage(captureCanvas, 0, 0);
     sc.lineWidth = lw; sc.font = `600 ${fs}px system-ui`;
@@ -246,10 +294,6 @@ function drawOverlay() {
       sc.strokeStyle = sc.fillStyle = COLOR[status];
       sc.strokeRect(x * W, y * H, w * W, h * H); sc.fillText(s.name, x * W + 4, y * H + fs);
     }
-  }
-  if (drag) {
-    const r = dragToRect(drag.x0, drag.y0, drag.x1, drag.y1, 0);
-    if (r) { ctx.strokeStyle = "#6c9bff"; ctx.setLineDash([lw * 3, lw * 2]); ctx.strokeRect(r[0] * W, r[1] * H, r[2] * W, r[3] * H); ctx.setLineDash([]); }
   }
 }
 
@@ -303,7 +347,7 @@ ui.overlay.addEventListener("pointermove", (e) => {
   if (!drag) return;
   const b = ui.overlay.getBoundingClientRect();
   [drag.x1, drag.y1] = stageToFrame(e.clientX - b.left, e.clientY - b.top, b.width, b.height, ...frameSize());
-  drawOverlay();
+  drawStage();
 });
 ui.overlay.addEventListener("pointerup", () => {
   if (!drag) return;
@@ -357,6 +401,7 @@ async function findSlots(ask = true) {
     // no shelfOnly: names from the 110-class model + "product" boxes of the shelf model
     const r = await detectShown(frame, { conf }, { phase: "find", step: 0, title: "หาสินค้าทุกชิ้นในภาพ", target: "ภาพเต็ม", area: [0, 0, 1, 1], full: true }, f);
     snapshotBoxes = r.boxes;
+    liveBoxes = { boxes: r.boxes, frame: f };
     drawOverlay();
     const items = toFoundItems(r.boxes, classes, r.width, r.height);
     decide(foundVerdict(items.length), f);
@@ -585,7 +630,7 @@ async function loop() {
           : null;
         if (fullFrame) {
           snapshotBoxes = fullFrame.boxes;
-          drawOverlay();
+          drawSnapshot();
           if (ui.follow.checked) followView(frame, fullFrame, f);
         }
         if (method === "full" && fullFrame) {
@@ -627,6 +672,8 @@ async function loop() {
         f.resultAt = performance.now();
         f.resultDelayMs = isVideoFile() ? Math.max(0, ui.video.currentTime * 1000 - f.time) : null;
         f.cycleMs = f.resultAt - f.captured;
+        if (fullFrame) liveBoxes = { boxes: fullFrame.boxes, frame: f };
+        drawStage();
         ui.latency.textContent = f.detectMs.toFixed(0);
         $("watchRoundLatency").textContent = f.cycleMs.toFixed(0);
         $("watchCallsRound").textContent = String(f.detectCalls);
@@ -750,7 +797,8 @@ ui.video.addEventListener("ended", () => {
 });
 $("watchSpeed").addEventListener("change", () => { ui.video.playbackRate = Number($<HTMLSelectElement>("watchSpeed").value); });
 ui.video.addEventListener("timeupdate", updateTimeline);
-setInterval(updateTimeline, 250);
+// Also redraws the live picture: slot statuses change with time, and old boxes must drop off the video.
+setInterval(() => { updateTimeline(); if (!drag) drawStage(); }, 250);
 
 // ---------------------------------------------------------------- sources
 
