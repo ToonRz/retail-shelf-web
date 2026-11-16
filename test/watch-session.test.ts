@@ -125,7 +125,7 @@ it('keeps result age on the real clock separate from video distance while paused
     return { boxes: [], width: 100, height: 100, latency_ms: 20 };
   });
   video.currentTime = 2;
-  click('watchStartBtn'); await tick(100);
+  click('watchStartBtn'); await tick(400); // 3 calls, each after one painted frame (up to 50 ms)
   expect(document.getElementById('watchResultDelay')!.textContent).toBe('3.0');
   expect(document.getElementById('watchTimelineGap')!.textContent).toBe('3.0');
   click('watchPlay');
@@ -154,4 +154,16 @@ it('changing the file during detection suppresses the old round before discovery
   expect(document.getElementById('watchStartBtn')!.textContent).toBe('เริ่มเฝ้า');
   expect(video.paused).toBe(true);
   expect(fake.detect).toHaveBeenCalledTimes(2); // old frame settles, then one new-file discovery call
+});
+
+it('stamps a playing frame with the media time of the frame on screen, not currentTime', async () => {
+  // The model blocks the main thread; a decoder that falls behind leaves the presented frame older than currentTime.
+  Object.assign(video, {
+    requestVideoFrameCallback: (cb: (now: number, meta: { mediaTime: number }) => void) => setTimeout(() => cb(0, { mediaTime: 1.5 }), 10),
+    cancelVideoFrameCallback: () => {},
+  });
+  video.currentTime = 9;
+  click('watchStartBtn'); await tick(400);
+  expect(document.getElementById('watchFrameInfo')!.textContent).toContain('คลิป 1.50 s');
+  expect(document.getElementById('watchFrameInfo')!.textContent).not.toContain('คลิป 9.00 s');
 });
