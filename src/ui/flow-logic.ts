@@ -67,7 +67,7 @@ export function slotVerdict(track: Track, has: boolean, blocked: boolean, event:
 export function roundVerdict(statuses: SlotStatus[], away: number): Verdict {
   const n = (s: SlotStatus) => statuses.filter((x) => x === s).length;
   const out = n("out"), checking = n("checking"), stocked = n("stocked");
-  const parts = [`มีของ ${stocked}`, `กำลังยืนยัน ${checking}`, `หมด ${out}`, ...(away ? [`นอกภาพ ${away}`] : [])].join(" · ");
+  const parts = [`มีของ ${stocked}`, `กำลังนับ ${checking}`, `หมด ${out}`, ...(away ? [`นอกภาพ ${away}`] : [])].join(" · ");
   if (out) return { tone: "bad", text: `ของหมด ${out} ช่อง`, sub: parts };
   if (checking) return { tone: "warn", text: `ว่าง ${checking} ช่อง`, sub: parts };
   return { tone: "good", text: "ของครบทุกช่อง", sub: parts };
