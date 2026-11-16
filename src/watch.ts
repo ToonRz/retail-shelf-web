@@ -6,10 +6,12 @@ import { FlowView, type FlowStep } from "./flow";
 import { confirmVerdict, followVerdict, foundVerdict, nameVerdict, roundVerdict, slotVerdict, topNameConf } from "./ui/flow-logic";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
-import { autoSlots, clipRect, composeView, relView, cropLabel, endMessage, evidenceAge, fallbackCursorAfter, fitViews, frameMotion, MIN_SHARP, nextFallbackSlots, matchFrameBoxes, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, statusText, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
+import { autoSlots, lookOf, moveFits, clipRect, composeView, relView, cropLabel, endMessage, evidenceAge, fallbackCursorAfter, fitViews, frameMotion, MIN_SHARP, nextFallbackSlots, matchFrameBoxes, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, statusText, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
 
 const INTERVAL_MS = 1000;
-const MAX_FALLBACKS_PER_ROUND = 2;
+// Crops of the slots the full frame left unclear are bounded by time only. A fixed 2 per round left an empty slot
+// unseen for 6-9 s on a shelf of 18 slots (alerts came that much late, and one "blocked" look paused the timer for
+// the whole gap) while a crop takes ~30 ms on WebGPU. On WASM (~0.3-0.7 s a crop) the budget still stops at 2-3.
 const FALLBACK_BUDGET_MS = 900;
 // A slot not looked at for this long restarts its empty timer. Rounds on a slow device (WASM, many slots) or the
 // round-robin crop queue can leave several seconds between looks at one slot, so this must stay well above that:
@@ -63,6 +65,7 @@ let liveBoxes: { boxes: DetectResult["boxes"]; frame: Frame } | null = null;
 const LIVE_BOX_MAX_MS = 2500; // older than this (clip time, or real time for a camera) = not drawn on the video
 let fallbackCursor = 0;
 const results = new Map<string, Frame>();
+const blockedNow = new Set<string>(); // slots whose last look had someone in front: shown as "ถูกบัง", their timers are paused
 type Method = "full" | "legacy";
 const comparison: Record<Method, { calls: number[]; detectMs: number[]; cycleMs: number[] }> = {
   full: { calls: [], detectMs: [], cycleMs: [] }, legacy: { calls: [], detectMs: [], cycleMs: [] },
@@ -71,7 +74,7 @@ const assertCurrent = (f: Frame) => { if (f.epoch !== epoch) throw cancelled; };
 const captureCanvas = document.createElement("canvas");
 const snapshotCanvas = $<HTMLCanvasElement>("watchSnapshot");
 function resetTimers() {
-  tracks.clear(); thumbs.clear(); results.clear(); watchRound = 0;
+  tracks.clear(); thumbs.clear(); results.clear(); blockedNow.clear(); watchRound = 0;
   fallbackCursor = 0;
   ui.latency.textContent = $("watchRoundLatency").textContent = $("watchResultDelay").textContent = $("watchResultAge").textContent = $("watchTimelineGap").textContent = $("watchCallsRound").textContent = "–";
   ui.log.replaceChildren(Object.assign(document.createElement("li"), { className: "muted placeholder", textContent: "ยังไม่มีการแจ้งเตือน" }));
@@ -185,9 +188,9 @@ function saveSlots() {
   try { localStorage.setItem(SLOTS_KEY, JSON.stringify(slots)); } catch { /* private mode */ }
 }
 
-type DisplayStatus = Track["status"] | "unknown" | "stale" | "away";
+type DisplayStatus = Track["status"] | "unknown" | "stale" | "away" | "blocked";
 // Kept short for the screen: no result yet and an old result both read "รอตรวจ" (they are told apart by colour only).
-const STATUS_LABEL: Record<DisplayStatus, string> = { ...STATUS_TH, unknown: "รอตรวจ", stale: "รอตรวจ", away: "นอกภาพ" };
+const STATUS_LABEL: Record<DisplayStatus, string> = { ...STATUS_TH, unknown: "รอตรวจ", stale: "รอตรวจ", away: "นอกภาพ", blocked: "ถูกบัง" };
 function statusLabel(s: Slot, status: DisplayStatus): string {
   if (status !== "checking") return STATUS_LABEL[status];
   const since = tracks.get(s.id)?.emptySince ?? null;
@@ -195,10 +198,11 @@ function statusLabel(s: Slot, status: DisplayStatus): string {
 }
 function displayStatus(s: Slot): DisplayStatus {
   if (isAway(s)) return "away";
-  const result = results.get(s.id);
-  if (!result) return "unknown";
   const status = tracks.get(s.id)?.status ?? "unknown";
   if (status === "out") return "out"; // a raised alert stays up until the slot is seen filled again
+  if (blockedNow.has(s.id)) return "blocked"; // says why the slot is not counting, instead of an old result going stale
+  const result = results.get(s.id);
+  if (!result) return "unknown";
   if (evidenceAge(result, isVideoFile(), now(), performance.now(), staleMs()).stale) return "stale";
   return status;
 }
@@ -207,7 +211,7 @@ const staleMs = () => Math.max(5000, Number(ui.hold.value) * 1000);
 
 // ---------------------------------------------------------------- draw
 
-const COLOR = { waiting: "#9aa1ad", stocked: "#2fa45a", checking: "#e0a100", out: "#e03b3b", unknown: "#9aa1ad", stale: "#8992a2", away: "#9aa1ad" };
+const COLOR = { waiting: "#9aa1ad", stocked: "#2fa45a", checking: "#e0a100", out: "#e03b3b", unknown: "#9aa1ad", stale: "#8992a2", away: "#9aa1ad", blocked: "#8992a2" };
 
 /** How far the last finished answer is behind the picture on screen (ms), or null when it is too old to draw. */
 function liveLag(f: Frame): number | null {
@@ -415,6 +419,7 @@ async function findSlots(ask = true) {
     drawOverlay();
     const items = toFoundItems(r.boxes, classes, r.width, r.height);
     decide(foundVerdict(items.length), f);
+    for (const it of items) it.look = itemLook(frame, it.xyxy);
     const toName = items.slice(0, MAX_NAME_CROPS);
     for (const [k, it] of toName.entries()) {
       await step(`กำลังระบุชื่อสินค้า ${k + 1} / ${toName.length}…`, k, toName.length);
@@ -483,6 +488,13 @@ async function findSlots(ask = true) {
     updateTimeline();
     updateControls();
   }
+}
+
+/** The look (lookOf) of the middle 60 % of a product box: the rim is mostly shelf and neighbours. */
+function itemLook(frame: ImageBitmap, [x1, y1, x2, y2]: [number, number, number, number]) {
+  const w = x2 - x1, h = y2 - y1;
+  thumbCtx.drawImage(frame, x1 + w * 0.2, y1 + h * 0.2, Math.max(1, w * 0.6), Math.max(1, h * 0.6), 0, 0, THUMB, THUMB);
+  return lookOf(thumbCtx.getImageData(0, 0, THUMB, THUMB).data, THUMB);
 }
 
 ui.autoBtn.addEventListener("click", () => void findSlots());
@@ -555,7 +567,7 @@ function slotMotion(frame: ImageBitmap, s: Slot): SlotMotion {
 function recordSlot(s: Slot, has: boolean, blocked: boolean, cfg: { holdMs: number; clearMs: number; maxObservationGapMs: number }, f: Frame) {
   const { track, event } = stepTrack(tracks.get(s.id) ?? newTrack(), has, blocked, f.time, cfg);
   tracks.set(s.id, track);
-  if (!blocked) results.set(s.id, f);
+  if (blocked) blockedNow.add(s.id); else { blockedNow.delete(s.id); results.set(s.id, f); }
   if (event) logEvent(s, event, f);
   return { track, event };
 }
@@ -584,7 +596,7 @@ async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdM
  * Where the reference frame is in this frame now (zoom + pan). Each round first measures how the frame moved since
  * the last round (frameMotion, trying the moves the boxes of the last frame and of the reference allow): not at all =
  * the view stays as it is (taking products away can never move the frames); a move = the last view carried over by
- * it, pinned to the reference close by (pinView). Only when the move
+ * it, pinned to the reference close by (pinView) and taken only if the reference fits it better (moveFits). Only when the move
  * is unclear for a few rounds in a row is the reference searched alone: every view the product boxes allow
  * (fitViews), the pictures pick one (refineView).
  */
@@ -602,7 +614,10 @@ function followView(frame: ImageBitmap, r: DetectResult, f: Frame) {
     const mv = last ? frameMotion(last.gray, gray, last.boxes, boxes, viaRef) : null;
     assertCurrent(f);
     if (mv) {
-      if (!mv.still) view = pinView(refGray, gray, composeView(mv.view, view));
+      if (!mv.still) {
+        const moved = pinView(refGray, gray, composeView(mv.view, view));
+        if (moveFits(refGray, gray, view, moved)) view = moved; // else someone walked past: the camera did not move
+      }
       lost = 0;
       last = { gray, boxes };
     } else if (++lost >= LOST_REFIT) {
@@ -654,7 +669,7 @@ async function loop() {
             else if (matches.matched.has(s.id)) recordSlot(s, true, state.blocked, cfg, f);
             else uncertain.add(s.id);
           }
-          const batch = nextFallbackSlots(slots, uncertain, fallbackCursor, MAX_FALLBACKS_PER_ROUND);
+          const batch = nextFallbackSlots(slots, uncertain, fallbackCursor, slots.length);
           const fallbackStarted = performance.now();
           const processed: Slot[] = [];
           for (const [k, s] of batch.slots.entries()) {

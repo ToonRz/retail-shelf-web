@@ -88,13 +88,58 @@ export function parseSlots(json: string | null): Slot[] {
 // ---------------------------------------------------------------- auto slots
 
 /** A product found on the full frame; name from the 110-class model on a crop of it (null until then, or when it has none). */
-export interface FoundItem { name: string | null; xyxy: [number, number, number, number] }
+export interface FoundItem { name: string | null; xyxy: [number, number, number, number]; look?: number[] }
 
 export const UNKNOWN_NAME = "สินค้าอื่น";
 export const AUTO_MAX_PER_SLOT = 6; // more facings per slot and the edge products fall outside slotHasProduct's inner 80%
 const AUTO_PAD = 0.04;              // slot = union of its boxes grown by this much of its own size on each side
 const AUTO_MAX_GAP = 0.5;           // same-name neighbours further apart than this many box widths start a new slot
 const AUTO_MAX_AREA = 0.4;          // a box covering more of the frame than this is not one product on a shelf
+
+// Tuning knobs for "do two neighbours look like the same product" (looksAlike). Measured on one synthetic shelf
+// clip (12 products x 4 facings): facings of one product differ by <= 21, neighbours of different products by >= 45,
+// and the mean colour alone could not tell them apart (15 vs 16). Widen AUTO_LOOK_TOL if real lighting splits a product.
+const AUTO_SIZE_TOL = 0.25; // box width and height may differ by this share of the larger one
+const AUTO_LOOK_TOL = 30;   // mean difference (0-255) between the colour grids of two boxes
+const LOOK_GRID = 4;
+
+/** A product's look: mean colour of each cell of a 4x4 grid over a square RGBA picture of it (see itemLook in watch.ts). */
+export function lookOf(rgba: Uint8ClampedArray, size: number): number[] {
+  const cell = size / LOOK_GRID, out = new Array<number>(LOOK_GRID * LOOK_GRID * 3).fill(0);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const k = (Math.floor(y / cell) * LOOK_GRID + Math.floor(x / cell)) * 3, i = (y * size + x) * 4;
+    out[k] += rgba[i]; out[k + 1] += rgba[i + 1]; out[k + 2] += rgba[i + 2];
+  }
+  return out.map((v) => v / (cell * cell));
+}
+
+/** Same size and same look: two facings of one product, as far as the picture alone can tell. */
+export function looksAlike(a: FoundItem, b: FoundItem): boolean {
+  if (!a.look || !b.look) return false;
+  const near = (p: number, q: number) => Math.abs(p - q) <= AUTO_SIZE_TOL * Math.max(p, q);
+  if (!near(a.xyxy[2] - a.xyxy[0], b.xyxy[2] - b.xyxy[0]) || !near(a.xyxy[3] - a.xyxy[1], b.xyxy[3] - b.xyxy[1])) return false;
+  let sum = 0;
+  for (let i = 0; i < a.look.length; i++) sum += Math.abs(a.look[i] - b.look[i]);
+  return sum / a.look.length <= AUTO_LOOK_TOL;
+}
+
+/**
+ * Do two neighbours belong in one slot? Two names decide it. When a name is missing (the 110-class model was not
+ * sure) the pictures decide: a name on only some facings of a product used to cut it into several slots, and
+ * unnamed neighbours of different products were joined into one slot that alerts only when both are gone.
+ * Without looks (items not made by findSlots) it is the names alone, as before.
+ */
+function sameProduct(a: FoundItem, b: FoundItem): boolean {
+  if (a.name !== null && b.name !== null) return a.name === b.name;
+  return a.look && b.look ? looksAlike(a, b) : a.name === b.name;
+}
+
+/** The name most facings of a slot got, or null when none has one. */
+function slotName(g: FoundItem[]): string | null {
+  const count = new Map<string, number>();
+  for (const { name } of g) if (name !== null) count.set(name, (count.get(name) ?? 0) + 1);
+  return [...count].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+}
 
 const AUTO_SAME = 0.6;               // two boxes sharing this much of the smaller one are one product seen by both models
 
@@ -144,7 +189,7 @@ export function cropLabel(boxes: Box[], classes: number, width: number, height: 
 
 /**
  * Turn the products seen on a full shelf into slots: boxes are split into shelf rows (vertical overlap),
- * neighbours in a row with the same name are joined into one slot, and a long run is split evenly so a
+ * neighbours in a row that are the same product (sameProduct: by name, or by looks when a name is missing) are joined into one slot, and a long run is split evenly so a
  * slot holds at most maxPerSlot facings. Slots come out top to bottom, left to right, with unique names.
  */
 export function autoSlots(items: FoundItem[], width: number, height: number, maxPerSlot = AUTO_MAX_PER_SLOT): Array<{ name: string; rect: Rect }> {
@@ -182,7 +227,7 @@ export function autoSlots(items: FoundItem[], width: number, height: number, max
       const prev = run[run.length - 1];
       const gap = prev ? it.xyxy[0] - prev.xyxy[2] : 0;
       const w = prev ? ((prev.xyxy[2] - prev.xyxy[0]) + (it.xyxy[2] - it.xyxy[0])) / 2 : 0;
-      if (prev && (prev.name !== it.name || gap > AUTO_MAX_GAP * w)) flush();
+      if (prev && (!sameProduct(prev, it) || gap > AUTO_MAX_GAP * w)) flush();
       run.push(it);
     }
     if (run.length) flush();
@@ -196,7 +241,7 @@ export function autoSlots(items: FoundItem[], width: number, height: number, max
     const px = (x2 - x1) * AUTO_PAD, py = (y2 - y1) * AUTO_PAD;
     const l = Math.max(0, x1 - px) / width, t = Math.max(0, y1 - py) / height;
     const r = Math.min(width, x2 + px) / width, b = Math.min(height, y2 + py) / height;
-    const base = g[0].name ?? UNKNOWN_NAME;
+    const base = slotName(g) ?? UNKNOWN_NAME;
     const n = (seen.get(base) ?? 0) + 1;
     seen.set(base, n);
     return { name: n === 1 ? base : `${base} ${n}`, rect: [l, t, r - l, b - t] as Rect };
@@ -553,6 +598,18 @@ export function frameMotion(last: Gray, cur: Gray, lastBoxes: NBox[], boxes: NBo
   if (m.sharp < MIN_SHARP) return null;
   const still = viewScore(last, cur, IDENTITY) >= m.score - STILL_SCORE;
   return { view: still ? IDENTITY : m.view, still };
+}
+
+const MOVE_GAIN = 0.01; // the reference must fit the moved view better than the view as it was by this much
+
+/**
+ * Is a move measured from the last frame (frameMotion) a move of the camera? Only then does the reference picture
+ * fit the moved view better than the view as it was. Someone walking past a nearly empty shelf is most of what
+ * changes between two frames, so the last frame matches best shifted along with them: on a still clip the slots
+ * jumped 6 % sideways that way (reference fit 0.60 -> 0.56), while real pans and zooms of the same clip gain 0.05-0.18.
+ */
+export function moveFits(ref: Gray, cur: Gray, from: View, to: View): boolean {
+  return viewScore(ref, cur, to) > viewScore(ref, cur, from) + MOVE_GAIN;
 }
 
 const PIN_MAX = { s: 0.06, t: 0.04 }; // the most a pin may move a carried view (relative zoom, pan)
