@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Box } from "../src/agent-contract";
-import { autoSlots, looksAlike, lookOf, cropLabel, clipRect, cropRect, dragToRect, composeView, endMessage, evidenceAge, fallbackCursorAfter, fitView, fitViews, frameMotion, type Gray, pinView, IDENTITY, refineView, mapRect, matchFrameBoxes, nextFallbackSlots, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, statusText, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME, type Slot } from "../src/ui/watch-logic";
+import { autoSlots, looksAlike, lookOf, moveFits, cropLabel, clipRect, cropRect, dragToRect, composeView, endMessage, evidenceAge, fallbackCursorAfter, fitView, fitViews, frameMotion, type Gray, pinView, IDENTITY, refineView, mapRect, matchFrameBoxes, nextFallbackSlots, type NBox, unmapRect, visibleFraction, type FoundItem, motionScore, newTrack, parseSlots, slotHasProduct, stageToFrame, statusText, stepTrack, toFoundItems, toGray, type Track, UNKNOWN_NAME, type Slot } from "../src/ui/watch-logic";
 
 const cfg = { holdMs: 10_000, clearMs: 3_000 };
 const box = (x1: number, y1: number, x2: number, y2: number): Box => ({ cls: "product", classId: 0, conf: 0.9, xyxy: [x1, y1, x2, y2] });
@@ -420,6 +420,15 @@ describe("refineView", () => {
   it("finds no clear match on a picture of something else", () => {
     const other: Gray = { w: 128, h: 96, px: Uint8Array.from({ length: 128 * 96 }, (_, i) => (i * 7919) % 251) };
     expect(refineView(render(IDENTITY), other, [IDENTITY]).sharp).toBeLessThan(0.03);
+  });
+
+  it("takes a measured move only when the reference fits the moved view better (someone walking past is not a pan)", () => {
+    const pan = { s: 1, tx: 0.065, ty: 0 };
+    // still camera, someone in front of the shelf: the reference fits the view as it was
+    expect(moveFits(render(IDENTITY), render(IDENTITY, [0.4, 0.2, 0.6, 1]), IDENTITY, pan)).toBe(false);
+    // the camera really panned (with the same person in the picture)
+    expect(moveFits(render(IDENTITY), render(pan, [0.4, 0.2, 0.6, 1]), IDENTITY, pan)).toBe(true);
+    expect(moveFits(render(IDENTITY), render(IDENTITY), IDENTITY, IDENTITY)).toBe(false);
   });
 });
 

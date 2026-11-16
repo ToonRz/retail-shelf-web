@@ -6,7 +6,7 @@ import { FlowView, type FlowStep } from "./flow";
 import { confirmVerdict, followVerdict, foundVerdict, nameVerdict, roundVerdict, slotVerdict, topNameConf } from "./ui/flow-logic";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
-import { autoSlots, lookOf, clipRect, composeView, relView, cropLabel, endMessage, evidenceAge, fallbackCursorAfter, fitViews, frameMotion, MIN_SHARP, nextFallbackSlots, matchFrameBoxes, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, statusText, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
+import { autoSlots, lookOf, moveFits, clipRect, composeView, relView, cropLabel, endMessage, evidenceAge, fallbackCursorAfter, fitViews, frameMotion, MIN_SHARP, nextFallbackSlots, matchFrameBoxes, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, statusText, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
 
 const INTERVAL_MS = 1000;
 // Crops of the slots the full frame left unclear are bounded by time only. A fixed 2 per round left an empty slot
@@ -596,7 +596,7 @@ async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdM
  * Where the reference frame is in this frame now (zoom + pan). Each round first measures how the frame moved since
  * the last round (frameMotion, trying the moves the boxes of the last frame and of the reference allow): not at all =
  * the view stays as it is (taking products away can never move the frames); a move = the last view carried over by
- * it, pinned to the reference close by (pinView). Only when the move
+ * it, pinned to the reference close by (pinView) and taken only if the reference fits it better (moveFits). Only when the move
  * is unclear for a few rounds in a row is the reference searched alone: every view the product boxes allow
  * (fitViews), the pictures pick one (refineView).
  */
@@ -614,7 +614,10 @@ function followView(frame: ImageBitmap, r: DetectResult, f: Frame) {
     const mv = last ? frameMotion(last.gray, gray, last.boxes, boxes, viaRef) : null;
     assertCurrent(f);
     if (mv) {
-      if (!mv.still) view = pinView(refGray, gray, composeView(mv.view, view));
+      if (!mv.still) {
+        const moved = pinView(refGray, gray, composeView(mv.view, view));
+        if (moveFits(refGray, gray, view, moved)) view = moved; // else someone walked past: the camera did not move
+      }
       lost = 0;
       last = { gray, boxes };
     } else if (++lost >= LOST_REFIT) {

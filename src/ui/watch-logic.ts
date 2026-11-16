@@ -600,6 +600,18 @@ export function frameMotion(last: Gray, cur: Gray, lastBoxes: NBox[], boxes: NBo
   return { view: still ? IDENTITY : m.view, still };
 }
 
+const MOVE_GAIN = 0.01; // the reference must fit the moved view better than the view as it was by this much
+
+/**
+ * Is a move measured from the last frame (frameMotion) a move of the camera? Only then does the reference picture
+ * fit the moved view better than the view as it was. Someone walking past a nearly empty shelf is most of what
+ * changes between two frames, so the last frame matches best shifted along with them: on a still clip the slots
+ * jumped 6 % sideways that way (reference fit 0.60 -> 0.56), while real pans and zooms of the same clip gain 0.05-0.18.
+ */
+export function moveFits(ref: Gray, cur: Gray, from: View, to: View): boolean {
+  return viewScore(ref, cur, to) > viewScore(ref, cur, from) + MOVE_GAIN;
+}
+
 const PIN_MAX = { s: 0.06, t: 0.04 }; // the most a pin may move a carried view (relative zoom, pan)
 
 /**
