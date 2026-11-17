@@ -255,6 +255,15 @@ export function endMessage(slots: Slot[], tracks: Map<string, Track>, holdSec: n
 }
 
 export const STATUS_TH: Record<SlotStatus, string> = { waiting: "รอตรวจ", stocked: "มีของ", checking: "ว่าง", out: "ของหมด" };
+/** What a slot's status was decided from in the last round, shown beside it in the slot table. */
+export type Evidence = "full" | "crop" | "blocked" | "next" | "away";
+export const EVIDENCE_TH: Record<Evidence, { icon: string; text: string; title: string }> = {
+  full: { icon: "▣", text: "ภาพเต็ม", title: "ตัดสินจากภาพเต็ม: มีกล่องสินค้าตรงช่องนี้ชัดเจน" },
+  crop: { icon: "⌗", text: "ครอป", title: "ภาพเต็มไม่ชัด จึงครอปช่องนี้ไปเช็กกับ model ชั้นวาง" },
+  blocked: { icon: "⏸", text: "ถูกบัง", title: "ภาพในช่องเปลี่ยนมาก (มีคนหรือของบัง): พักตัวนับเวลา" },
+  next: { icon: "↻", text: "รอบหน้า", title: "ภาพเต็มไม่ชัด และรอบนี้ครอปไม่ทัน: ใช้ผลรอบก่อน" },
+  away: { icon: "⤢", text: "นอกภาพ", title: "ช่องนี้อยู่นอกภาพ (ซูมหรือเลื่อนกล้อง): ไม่ตัดสิน" },
+};
 
 /** A slot's status in a few words. An empty slot that has not alerted yet shows its count, e.g. "ว่าง 7/15 วิ". */
 export function statusText(status: SlotStatus, emptyMs: number | null, holdMs: number): string {

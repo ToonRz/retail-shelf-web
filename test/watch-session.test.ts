@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 const fake = vi.hoisted(() => ({ detect: vi.fn() }));
 vi.mock('../src/agent', () => ({ SHELF_AGENT_VERSION: 'mock', loadAgent: async () => ({ manifest: { model: { classes: 110 } }, backend: 'wasm', detect: fake.detect }) }));
 vi.mock('../src/flow', () => ({ FlowView: class {
-  ready() {} round() {} send() {} reply() {} fail() {} decide() {} idle() {} reset() {} roundDone() {}
+  ready() {} start() {} send() {} reply() {} fail() {} decide() {} stepDone() {} skip() {} idle() {} reset() {} roundDone() {}
 } }));
 
 let video: HTMLVideoElement;
@@ -72,6 +72,19 @@ it('keeps result boxes and timestamps tied to one shared snapshot', async () => 
   expect(rows.map(r => r.dataset.frameTime)).toEqual(['12000', '12000']);
   expect(document.getElementById('watchComparison')!.textContent).toContain('ภาพเต็ม: 1 รอบ · 3.0 calls/รอบ'); // one full frame + two fair fallback crops
   expect(document.getElementById('watchFrameInfo')!.textContent).toContain('Snapshot #');
+});
+
+it('the slot table says what each slot was decided from: a box on the full frame, or a crop', async () => {
+  // slot0 has a product box on the full frame; slot1 has none there, so it is cropped
+  fake.detect.mockImplementation(async () => {
+    await new Promise(r => setTimeout(r, 100));
+    return { boxes: [{ cls: 'product', classId: 110, conf: .9, xyxy: [5, 10, 45, 90] }], width: 100, height: 100, latency_ms: 100 };
+  });
+  video.currentTime = 3;
+  click('watchStartBtn'); await tick(400);
+  const how = [...document.querySelectorAll<HTMLElement>('#watchSlots tr .slot-how')].map(e => e.textContent);
+  expect(how[0]).toContain('ภาพเต็ม');
+  expect(how[1]).toContain('ครอป');
 });
 
 it('keeps the legacy crop-every-slot path available for comparison', async () => {

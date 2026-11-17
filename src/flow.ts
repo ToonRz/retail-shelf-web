@@ -1,63 +1,70 @@
 // The "what is the agent doing" strip of the shelf watch page, and the reticle on the stage that shows where the
-// model is looking. Made to be read from a projector: one headline, the picture the web sends, which model is
-// working, and what the web decided from the answer.
+// model is looking. One card per step of the job (PHASES), in the order watch.ts runs them, each saying who does it
+// (the agent and which model, or the web itself) and what came out of it.
 //
+// Readability: a crop takes ~30 ms on WebGPU, so anything redrawn per detect() call flickers. Only the step in
+// progress changes while a round runs; a finished step keeps its summary, and a step not reached yet keeps last
+// round's summary (dimmed) until it starts, so a steady shelf gives a steady strip.
 // Smoothness: keep the strip lightweight so it can update without delaying or holding a detection round.
 import type { Agent, DetectOptions, DetectResult } from "./agent-contract";
-import { modelsUsed, PHASES, type Phase, type Verdict } from "./ui/flow-logic";
+import { callStats, modelsUsed, PHASES, type Phase, type Verdict } from "./ui/flow-logic";
 
 type Rect = [number, number, number, number]; // x, y, w, h
+type ModelKey = "primary" | "shelf";
 
 export interface FlowStep {
   phase: Phase;
-  step: number;            // index into PHASES[phase]
-  title: string;           // headline: what the agent is doing now
-  target: string;          // caption under the picture sent
-  area: Rect | null;       // where on the frame (fractions of it), for the reticle
-  full?: boolean;          // the whole frame is sent (not a crop)
+  step: number;                 // index into PHASES[phase]
+  title: string;                // what this call does, shown on the step's card while it runs
+  area: Rect | null;            // where on the frame (fractions of it), for the reticle
+  full?: boolean;               // the whole frame is sent (not a crop)
+  progress?: [number, number];  // n of total, for steps made of many calls
 }
 
+export interface FlowJob {
+  phase: Phase;
+  kicker: string;
+  title: string;
+  mode: string;                 // how the job runs, as a chip in the head
+  meta?: string;                // left as it is when omitted
+}
+
+type StepState = "wait" | "on" | "done" | "skip" | "bad";
+interface Card { li: HTMLElement; text: HTMLElement; sub: HTMLElement; stats: HTMLElement; bar: HTMLElement; calls: number; ms: number }
+
 const LOG_LIMIT = 30;
-const THUMB_W = 360, THUMB_H = 200;
 const CORNER = 22;
 const SHOW_KEY = "watchFlowShow";
+const MODEL_LABEL: Record<ModelKey, string> = { shelf: "▢ model ชั้นวาง", primary: "Aa model ชื่อสินค้า" };
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const reduceMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+const span = (className: string, text = "") => Object.assign(document.createElement("span"), { className, textContent: text });
 
 export class FlowView {
   private el = {
-    root: $("watchFlow"), title: $("flowTitle"), kicker: $("flowKicker"), phases: $("flowPhases"), round: $("flowRound"),
-    show: $<HTMLInputElement>("watchFlowShow"),
-    thumb: $<HTMLCanvasElement>("flowThumb"), target: $("flowTarget"), call: $("flowCall"),
-    release: $("flowRelease"), reply: $("flowReply"), wireOut: $("flowWireOut"),
-    result: $("flowResult"), verdict: $("flowVerdict"), verdictSub: $("flowVerdictSub"),
-    log: $("flowLog"), logBox: $<HTMLDetailsElement>("flowLogBox"), json: $("flowJson"), jsonBox: $<HTMLDetailsElement>("flowJsonBox"),
+    root: $("watchFlow"), title: $("flowTitle"), kicker: $("flowKicker"), meta: $("flowMeta"), mode: $("flowMode"),
+    release: $("flowRelease"), steps: $("flowSteps"), show: $<HTMLInputElement>("watchFlowShow"),
+    log: $("flowLog"), json: $("flowJson"), jsonBox: $<HTMLDetailsElement>("flowJsonBox"),
     scan: $("watchScan"), scanFill: $("watchScanFill"), scanTag: $("watchScanTag"),
     corners: ["tl", "tr", "bl", "br"].map((c) => $(`watchScan-${c}`)),
   };
-  private models = new Map<"primary" | "shelf", { card: HTMLElement; state: HTMLElement }>();
-  private ctx = this.el.thumb.getContext("2d")!;
-  private fit = { x: 0, y: 0, k: 1 }; // where the last picture sent was drawn on the thumbnail
-  // The last whole frame sent, as drawn on the thumbnail. A crop sent after it is shown as a box on this frame
-  // (the crop alone would replace the whole frame within a few ms, and it would look as if only crops are sent).
-  private fullThumb: HTMLCanvasElement | null = null;
-  private fullFit = { x: 0, y: 0, k: 1, w: 0, h: 0 };
-  private cropOn: { x: number; y: number; kx: number; ky: number } | null = null; // crop pixels -> thumbnail
+  private models = new Map<ModelKey, { row: HTMLElement; state: HTMLElement; calls: number }>();
   private agent: Agent | null = null;
-  private calls = 0;
   private phase: Phase | null = null;
+  private cards: Card[] = [];
+  private started = new Set<number>(); // steps that have run in the current job
+  private current: number | null = null;
+  private calls = 0;
   private area: Rect | null = null;
   private lastResult: DetectResult | null = null;
 
   /** `place` maps fractions of the frame to pixels of the stage (null while there is no picture). */
   constructor(private place: (area: Rect) => Rect | null) {
     for (const key of ["primary", "shelf"] as const) {
-      const card = $(`flowModel-${key}`);
-      this.models.set(key, { card, state: card.querySelector<HTMLElement>(".fm-state")! });
+      const row = $(`flowModel-${key}`);
+      this.models.set(key, { row, state: row.querySelector<HTMLElement>(".fm-state")!, calls: 0 });
     }
-    this.el.thumb.width = THUMB_W;
-    this.el.thumb.height = THUMB_H;
     try { this.el.show.checked = localStorage.getItem(SHOW_KEY) !== "0"; } catch { /* private mode */ }
     this.el.show.addEventListener("change", () => {
       try { localStorage.setItem(SHOW_KEY, this.el.show.checked ? "1" : "0"); } catch { /* private mode */ }
@@ -66,7 +73,6 @@ export class FlowView {
     this.el.jsonBox.addEventListener("toggle", () => this.renderJson());
     new ResizeObserver(() => this.moveScan(this.area, false)).observe(this.el.scan.parentElement!);
     this.syncShown();
-    this.clearThumb();
   }
 
   get shown() { return this.el.show.checked; }
@@ -79,202 +85,202 @@ export class FlowView {
 
   ready(agent: Agent) {
     this.agent = agent;
-    this.el.release.textContent = `${agent.manifest.version} · ${agent.backend === "webgpu" ? "WebGPU" : "WASM"}`;
+    this.el.release.textContent = `agent ${agent.manifest.version} · ${agent.backend === "webgpu" ? "WebGPU" : "WASM"}`;
     const { model, shelfModel } = agent.manifest;
-    const fill = (key: "primary" | "shelf", info: { name: string; classes: number; dataset: string; sha256?: string } | undefined) => {
+    const fill = (key: ModelKey, info: { name: string; classes: number; dataset: string; sha256?: string } | undefined) => {
       const m = this.models.get(key)!;
-      m.card.hidden = !info;
+      m.row.hidden = !info;
       if (!info) return;
-      m.card.querySelector(".fm-meta")!.textContent = `${info.name} · ${info.classes} คลาส`;
-      m.card.title = `${info.name} · ${info.dataset} · ${info.classes} classes${info.sha256 ? `\nsha256 ${info.sha256}` : ""}`;
+      m.row.querySelector(".fm-meta")!.textContent = `${info.classes} คลาส`;
+      m.row.title = `${info.name} · ${info.dataset} · ${info.classes} classes${info.sha256 ? `\nsha256 ${info.sha256}` : ""}`;
     };
     fill("primary", model);
     fill("shelf", shelfModel);
     this.idle("พร้อมแล้ว", "เลือกรูป / วิดีโอ หรือเปิดกล้อง");
   }
 
-  /** Nothing in flight: a headline, no active model, no reticle. */
-  idle(kicker: string, title: string) {
+  /** Nothing in flight: a headline, no reticle. The step cards keep the last job's results. */
+  idle(kicker: string, title: string, meta?: string) {
     delete this.el.root.dataset.busy;
     this.el.kicker.textContent = kicker;
     this.el.title.textContent = title;
-    this.setModels([], "");
+    if (meta !== undefined) this.el.meta.textContent = meta;
+    if (this.current !== null && this.cards[this.current]?.li.dataset.state === "on") this.setState(this.current, "wait");
+    this.current = null;
+    this.lightModels([]);
     this.moveScan(null);
   }
 
-  /** A new source: forget the last picture and answer. */
+  /** A new source: forget the last job and answer. */
   reset() {
     this.lastResult = null;
     this.el.log.replaceChildren();
     this.el.json.textContent = "–";
-    this.idle("รอภาพ", "รอรอบตรวจถัดไป");
     this.phase = null;
-    this.renderPhases(null, -1);
-    this.el.round.textContent = "";
-    this.fullThumb = null;
-    this.cropOn = null;
-    this.clearThumb();
-    this.el.target.textContent = "—";
-    this.el.call.textContent = "detect()";
-    this.el.reply.textContent = "—";
-    this.setVerdict(null);
+    this.cards = [];
+    this.el.steps.replaceChildren();
+    this.el.mode.hidden = true;
+    for (const m of this.models.values()) { m.calls = 0; m.state.textContent = ""; m.row.classList.remove("idle", "on"); }
+    this.idle("รอภาพ", "รอรอบตรวจถัดไป", "");
   }
 
-  round(n: number | null) { this.el.round.textContent = n === null ? "" : `รอบ #${String(n).padStart(4, "0")}`; }
+  /** A job (auto slots, or one watch round) starts: every step waits, still showing what it found last time. */
+  start(job: FlowJob) {
+    this.el.root.dataset.busy = "1";
+    this.el.kicker.textContent = job.kicker;
+    this.el.title.textContent = job.title;
+    if (job.meta !== undefined) this.el.meta.textContent = job.meta;
+    this.el.mode.hidden = false;
+    this.el.mode.textContent = job.mode;
+    if (job.phase !== this.phase) this.buildCards(job.phase);
+    this.started.clear();
+    this.current = null;
+    this.cards.forEach((_, k) => this.setState(k, "wait"));
+    for (const m of this.models.values()) m.calls = 0;
+    this.lightModels([]);
+  }
 
-  /** The web hands a picture to the agent. Draws it, lights the models the call runs, moves the reticle. */
+  /** The web hands a picture to the agent: the step's card shows what it is doing, the reticle moves there. */
   send(step: FlowStep, image: ImageBitmap, options: DetectOptions) {
     if (!this.shown) return;
+    if (step.phase !== this.phase) this.buildCards(step.phase);
+    const card = this.cards[step.step];
+    if (!card) return;
     this.el.root.dataset.busy = "1";
-    this.el.kicker.textContent = "Agent กำลัง";
-    this.el.title.textContent = step.title;
-    this.renderPhases(step.phase, step.step);
-    const onFull = this.drawThumb(image, step);
-    this.el.target.textContent = `${step.target}${onFull ? " (กรอบส้มในภาพเต็ม)" : ""} · ${image.width}×${image.height} px`;
-    const used = modelsUsed(options.shelfOnly, !!this.agent?.manifest.shelfModel);
-    this.el.call.textContent = `${step.full ? "ภาพเต็ม" : "ครอป"}${options.shelfOnly ? " · shelfOnly" : ""}`;
-    this.el.reply.textContent = "…";
-    this.setModels(used, "กำลังดูภาพ…");
-    this.el.result.dataset.wait = "1";
+    if (!this.started.has(step.step)) { this.started.add(step.step); card.calls = 0; card.ms = 0; card.stats.textContent = ""; }
+    this.current = step.step;
+    this.setState(step.step, "on");
+    card.text.textContent = step.title;
+    card.text.className = "fs-text";
+    card.sub.textContent = `${step.full ? "ภาพเต็ม" : "ครอป"} ${image.width}×${image.height} px`;
+    card.bar.style.width = step.progress ? `${Math.round((step.progress[0] / Math.max(1, step.progress[1])) * 100)}%` : "";
+    card.bar.classList.toggle("indeterminate", !step.progress);
+    const used = this.used(options);
+    this.lightModels(used);
     this.el.scanTag.textContent = used.length === 2 ? "AI ทั้ง 2 model กำลังดู" : used[0] === "shelf" ? "Model ชั้นวาง กำลังดู" : "Model ชื่อสินค้า กำลังดู";
     this.el.scan.dataset.tone = "";
     this.moveScan(step.area);
   }
 
-  /** The agent answered: its boxes go on the picture, the models report their time. */
+  /** The agent answered: the call is counted on its step and its model(s), and logged. */
   reply(result: DetectResult, options: DetectOptions, frame?: { id: number; time: number }) {
     this.lastResult = result;
     this.log(result, options, frame);
     if (!this.shown) return;
-    const used = modelsUsed(options.shelfOnly, !!this.agent?.manifest.shelfModel);
-    this.setModels(used, `✓ ${Math.round(result.latency_ms)} ms`, true);
-    const n = result.boxes.length;
-    this.el.reply.textContent = `${n} กล่อง · ${Math.round(result.latency_ms)} ms`;
-    this.drawBoxes(result);
-    this.pulse(this.el.wireOut.querySelector(".wire-line i") as HTMLElement);
+    const used = this.used(options);
+    for (const key of used) this.models.get(key)!.calls++;
+    this.lightModels([]);
+    const card = this.current === null ? null : this.cards[this.current];
+    if (card) {
+      card.calls++;
+      card.ms += result.latency_ms;
+      card.stats.textContent = callStats(card.calls, card.ms);
+    }
     if (this.el.jsonBox.open) this.renderJson();
   }
 
-  /** What the web made of the answer. */
+  /** What the web made of one answer: tints the reticle only (the card waits for the step's summary). */
   decide(v: Verdict) {
     if (!this.shown) return;
-    this.setVerdict(v);
     this.el.scan.dataset.tone = v.tone;
+  }
+
+  /** A step is over: its card keeps this summary until the step runs again. */
+  stepDone(step: number, v: Verdict) {
+    if (!this.shown) return;
+    const card = this.cards[step];
+    if (!card) return;
+    if (!this.started.has(step)) { this.started.add(step); card.calls = 0; card.ms = 0; card.stats.textContent = ""; }
+    this.setState(step, "done");
+    this.setResult(card, v);
+    if (this.current === step) { this.current = null; this.moveScan(null); }
+  }
+
+  /** A step that does not run in this job (e.g. no full frame with the old method). */
+  skip(step: number, why: string) {
+    if (!this.shown) return;
+    const card = this.cards[step];
+    if (!card) return;
+    this.started.add(step);
+    this.setState(step, "skip");
+    card.calls = 0; card.ms = 0;
+    this.setResult(card, { tone: "info", text: "ข้าม", sub: why });
+    card.text.className = "fs-text";
+    card.stats.textContent = "";
   }
 
   fail(message: string) {
     delete this.el.root.dataset.busy;
-    this.setModels([], "");
-    this.setVerdict({ tone: "bad", text: "ตรวจไม่สำเร็จ", sub: message });
+    const card = this.current === null ? null : this.cards[this.current];
+    if (card) {
+      this.setState(this.current!, "bad");
+      this.setResult(card, { tone: "bad", text: "ตรวจไม่สำเร็จ", sub: message });
+    }
+    this.current = null;
+    this.lightModels([]);
     this.moveScan(null);
   }
 
-  /** End of a watch round: the summary, with the reticle off. */
-  roundDone(v: Verdict) {
+  /** End of a watch round: the last step's summary, the round's numbers in the head, the reticle off. */
+  roundDone(v: Verdict, title: string, meta: string) {
     if (!this.shown) return;
-    delete this.el.root.dataset.busy;
-    this.el.kicker.textContent = "เว็บสรุปรอบ";
-    this.el.title.textContent = "อัปเดตสถานะทุกช่องบนจอ";
-    this.renderPhases("watch", 2);
-    this.setModels([], "");
-    this.setVerdict(v);
-    this.moveScan(null);
+    if (this.phase) this.stepDone(PHASES[this.phase].length - 1, v);
+    this.idle("กำลังเฝ้า", title, meta);
   }
 
   // ------------------------------------------------------------ parts
 
-  private renderPhases(phase: Phase | null, step: number) {
-    if (phase !== this.phase) {
-      this.phase = phase;
-      this.el.phases.replaceChildren(...(phase ? PHASES[phase].map((label, i) => {
-        const li = document.createElement("li");
-        const n = document.createElement("span");
-        n.className = "ph-n";
-        n.textContent = String(i + 1);
-        li.append(n, label);
-        return li;
-      }) : []));
-    }
-    [...this.el.phases.children].forEach((li, i) => {
-      li.classList.toggle("on", i === step);
-      li.classList.toggle("done", i < step);
+  private used(options: DetectOptions): ModelKey[] {
+    return modelsUsed(options.shelfOnly, !!this.agent?.manifest.shelfModel);
+  }
+
+  private buildCards(phase: Phase) {
+    this.phase = phase;
+    const hasShelf = !!this.agent?.manifest.shelfModel;
+    this.cards = PHASES[phase].map((def, k) => {
+      const li = document.createElement("li");
+      li.className = "flow-step";
+      const top = document.createElement("div");
+      top.className = "fs-top";
+      top.append(span("fs-n", String(k + 1)), span("fs-title", def.title));
+      const who = document.createElement("div");
+      who.className = "fs-who";
+      if (def.by === "web") who.append(span("fs-web", "เว็บ"));
+      else who.append(span("fs-agent", "Agent"), ...modelsUsed(def.shelfOnly, hasShelf).map((m) => span("fs-model", MODEL_LABEL[m])));
+      const result = document.createElement("p");
+      result.className = "fs-result";
+      const text = span("fs-text", "รอ…"), sub = span("fs-sub");
+      result.append(text, " ", sub);
+      const stats = Object.assign(document.createElement("p"), { className: "fs-stats" });
+      const track = span("fs-bar"), bar = document.createElement("i");
+      track.append(bar);
+      li.append(top, who, result, stats, track);
+      return { li, text, sub, stats, bar, calls: 0, ms: 0 };
     });
+    this.el.steps.style.setProperty("--steps", String(this.cards.length));
+    this.el.steps.replaceChildren(...this.cards.map((c) => c.li));
   }
 
-  private setModels(active: Array<"primary" | "shelf">, text: string, done = false) {
+  private setState(step: number, state: StepState) {
+    const card = this.cards[step];
+    if (card && card.li.dataset.state !== state) card.li.dataset.state = state;
+  }
+
+  private setResult(card: Card, v: Verdict) {
+    if (card.text.textContent !== v.text) card.text.textContent = v.text;
+    card.text.className = `fs-text tone-${v.tone}`;
+    if (card.sub.textContent !== v.sub) card.sub.textContent = v.sub;
+    card.bar.classList.remove("indeterminate");
+    card.bar.style.width = "";
+  }
+
+  /** Models of the call in flight are lit; each row counts this job's calls. */
+  private lightModels(active: ModelKey[]) {
     for (const [key, m] of this.models) {
-      const on = active.includes(key);
-      m.card.classList.toggle("on", on && !done);
-      m.card.classList.toggle("done", on && done);
-      m.card.classList.toggle("off", active.length > 0 && !on);
-      m.state.textContent = on ? text : active.length ? "พักรอบนี้" : "";
-    }
-  }
-
-  private setVerdict(v: Verdict | null) {
-    delete this.el.result.dataset.wait;
-    this.el.result.dataset.tone = v?.tone ?? "";
-    const text = v?.text ?? "—", sub = v?.sub ?? "";
-    if (this.el.verdict.textContent === text && this.el.verdictSub.textContent === sub) return;
-    this.el.verdict.textContent = text;
-    this.el.verdictSub.textContent = sub;
-    if (v && !reduceMotion()) {
-      this.el.verdict.animate([{ opacity: 0.5, transform: "translateY(5px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.2,.8,.2,1)" });
-    }
-  }
-
-  private clearThumb() {
-    this.ctx.fillStyle = "#0d0f13";
-    this.ctx.fillRect(0, 0, THUMB_W, THUMB_H);
-  }
-
-  /** Draws the picture sent. A crop with a known place on the last whole frame is drawn as that frame with the
-   *  crop boxed and the rest dimmed; returns true then. */
-  private drawThumb(image: ImageBitmap, step: FlowStep): boolean {
-    this.clearThumb();
-    this.cropOn = null;
-    if (!step.full && step.area && this.fullThumb) {
-      const { x, y, w, h } = this.fullFit;
-      this.ctx.drawImage(this.fullThumb, 0, 0);
-      const [ax, ay, aw, ah] = step.area;
-      const rx = x + ax * w, ry = y + ay * h, rw = Math.max(2, aw * w), rh = Math.max(2, ah * h);
-      this.ctx.save();
-      this.ctx.fillStyle = "rgba(13, 15, 19, 0.55)";
-      this.ctx.beginPath();
-      this.ctx.rect(0, 0, THUMB_W, THUMB_H);
-      this.ctx.rect(rx, ry, rw, rh);
-      this.ctx.fill("evenodd");
-      this.ctx.lineWidth = 2;
-      this.ctx.strokeStyle = "#ffb020";
-      this.ctx.strokeRect(rx, ry, rw, rh);
-      this.ctx.restore();
-      this.cropOn = { x: rx, y: ry, kx: rw / image.width, ky: rh / image.height };
-      return true;
-    }
-    const k = Math.min(THUMB_W / image.width, THUMB_H / image.height);
-    const w = image.width * k, h = image.height * k;
-    this.fit = { x: (THUMB_W - w) / 2, y: (THUMB_H - h) / 2, k };
-    this.ctx.drawImage(image, this.fit.x, this.fit.y, w, h);
-    if (step.full) {
-      this.fullThumb ??= Object.assign(document.createElement("canvas"), { width: THUMB_W, height: THUMB_H });
-      const c = this.fullThumb.getContext("2d")!;
-      c.clearRect(0, 0, THUMB_W, THUMB_H);
-      c.drawImage(this.el.thumb, 0, 0);
-      this.fullFit = { x: this.fit.x, y: this.fit.y, k, w, h };
-    }
-    return false;
-  }
-
-  /** Boxes of the 110-class model in blue, boxes of the shelf model in green, on the picture that was sent. */
-  private drawBoxes(r: DetectResult) {
-    const classes = this.agent?.manifest.model.classes ?? Infinity;
-    const k = Math.min(THUMB_W / r.width, THUMB_H / r.height);
-    const map = this.cropOn ?? { x: this.fit.x, y: this.fit.y, kx: k, ky: k };
-    this.ctx.lineWidth = 2;
-    for (const b of r.boxes) {
-      const [x1, y1, x2, y2] = b.xyxy;
-      this.ctx.strokeStyle = b.classId < classes ? "#6c9bff" : "#3ccf7a";
-      this.ctx.strokeRect(map.x + x1 * map.kx, map.y + y1 * map.ky, (x2 - x1) * map.kx, (y2 - y1) * map.ky);
+      m.row.classList.toggle("on", active.includes(key));
+      m.row.classList.toggle("idle", m.calls === 0 && !active.includes(key));
+      const text = m.calls ? `${m.calls} call${m.calls > 1 ? "s" : ""}` : this.phase === "watch" && key === "primary" ? "ไม่ใช้ระหว่างเฝ้า (ใช้ตอนหาช่อง)" : this.phase ? "ไม่ได้ใช้" : "";
+      if (m.state.textContent !== text) m.state.textContent = text;
     }
   }
 
@@ -292,12 +298,6 @@ export class FlowView {
     this.el.corners.forEach((el, i) => { el.style.transform = `translate(${pos[i][0]}px, ${pos[i][1]}px) scale(${c / CORNER})`; });
     this.el.scanFill.style.transform = `translate(${x}px, ${y}px) scale(${w / 100}, ${h / 100})`;
     this.el.scanTag.style.transform = `translate(${x}px, ${y >= 30 ? y - 30 : y + 6}px)`;
-  }
-
-  /** One dot along a wire, once (Web Animations on transform: compositor). */
-  private pulse(dot: HTMLElement | null) {
-    if (!dot || reduceMotion()) return;
-    dot.animate([{ transform: "translateX(0)", opacity: 0 }, { opacity: 1, offset: 0.15 }, { opacity: 1, offset: 0.85 }, { transform: "translateX(100%)", opacity: 0 }], { duration: 420, easing: "ease-in-out" });
   }
 
   private log(r: DetectResult, options: DetectOptions, frame?: { id: number; time: number }) {

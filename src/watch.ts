@@ -3,10 +3,10 @@
 // Each slot is cropped from the camera, a video file or a still picture and checked for any product box with the 1-class shelf model only (shelfOnly).
 import type { Agent, Backend, DetectOptions, DetectResult } from "./agent-contract";
 import { FlowView, type FlowStep } from "./flow";
-import { confirmVerdict, followVerdict, foundVerdict, nameVerdict, roundVerdict, slotVerdict, topNameConf } from "./ui/flow-logic";
+import { boxesVerdict, confirmVerdict, cropVerdict, followVerdict, foundVerdict, keptVerdict, matchVerdict, namedVerdict, nameVerdict, roundVerdict, slotVerdict, topNameConf, type Verdict } from "./ui/flow-logic";
 import { loadAgent, SHELF_AGENT_VERSION } from "./agent";
 import { errorMessage, formatMB } from "./ui/logic";
-import { autoSlots, lookOf, moveFits, clipRect, composeView, relView, cropLabel, endMessage, evidenceAge, fallbackCursorAfter, fitViews, frameMotion, MIN_SHARP, nextFallbackSlots, matchFrameBoxes, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, statusText, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
+import { autoSlots, lookOf, moveFits, clipRect, composeView, relView, cropLabel, endMessage, evidenceAge, fallbackCursorAfter, fitViews, frameMotion, MIN_SHARP, nextFallbackSlots, matchFrameBoxes, pinView, type Gray, IDENTITY, mapRect, refineView, type NBox, normBoxes, unmapRect, type View, visibleFraction, cropRect, dragToRect, type Evidence, EVIDENCE_TH, motionScore, newTrack, parseSlots, type Rect, type Slot, slotHasProduct, stageToFrame, STATUS_TH, statusText, stepTrack, toFoundItems, toGray, type Track } from "./ui/watch-logic";
 
 const INTERVAL_MS = 1000;
 // Crops of the slots the full frame left unclear are bounded by time only. A fixed 2 per round left an empty slot
@@ -66,15 +66,22 @@ const LIVE_BOX_MAX_MS = 2500; // older than this (clip time, or real time for a 
 let fallbackCursor = 0;
 const results = new Map<string, Frame>();
 const blockedNow = new Set<string>(); // slots whose last look had someone in front: shown as "ถูกบัง", their timers are paused
+const evidence = new Map<string, Evidence>(); // what each slot was decided from in the last round (slot table)
 type Method = "full" | "legacy";
 const comparison: Record<Method, { calls: number[]; detectMs: number[]; cycleMs: number[] }> = {
   full: { calls: [], detectMs: [], cycleMs: [] }, legacy: { calls: [], detectMs: [], cycleMs: [] },
 };
 const assertCurrent = (f: Frame) => { if (f.epoch !== epoch) throw cancelled; };
+const roundTitle = (n: number) => `รอบ #${String(n).padStart(4, "0")}`;
+/** The head of the strip after a job: which picture, how long, how many calls. */
+function jobMeta(f: Frame): string {
+  const at = isVideoFile() ? `ภาพที่ ${(f.time / 1000).toFixed(1)} s · ` : "";
+  return `${at}เสร็จใน ${((performance.now() - f.captured) / 1000).toFixed(2)} s · ${f.detectCalls} call${f.detectCalls === 1 ? "" : "s"}`;
+}
 const captureCanvas = document.createElement("canvas");
 const snapshotCanvas = $<HTMLCanvasElement>("watchSnapshot");
 function resetTimers() {
-  tracks.clear(); thumbs.clear(); results.clear(); blockedNow.clear(); watchRound = 0;
+  tracks.clear(); thumbs.clear(); results.clear(); blockedNow.clear(); evidence.clear(); watchRound = 0;
   fallbackCursor = 0;
   ui.latency.textContent = $("watchRoundLatency").textContent = $("watchResultDelay").textContent = $("watchResultAge").textContent = $("watchTimelineGap").textContent = $("watchCallsRound").textContent = "–";
   ui.log.replaceChildren(Object.assign(document.createElement("li"), { className: "muted placeholder", textContent: "ยังไม่มีการแจ้งเตือน" }));
@@ -192,9 +199,14 @@ async function detectShown(image: ImageBitmap, options: DetectOptions, step: Flo
 }
 
 /** Shows what the web made of an answer without delaying the next detection. */
-function decide(v: Parameters<FlowView["decide"]>[0], f: Frame) {
+function decide(v: Verdict, f: Frame) {
   assertCurrent(f);
   flow.decide(v);
+}
+/** A step of the job is over (its card on the strip keeps this summary). */
+function stepDone(step: number, v: Verdict, f: Frame) {
+  assertCurrent(f);
+  flow.stepDone(step, v);
 }
 
 const media = () => (isImage ? ui.image : ui.video);
@@ -352,6 +364,11 @@ function renderSlots() {
     nameTd.append(input);
     const status = displayStatus(s);
     const st = Object.assign(document.createElement("td"), { textContent: statusLabel(s, status), className: `slot-${status}` });
+    const from = evidence.get(s.id);
+    if (from && status !== "unknown") {
+      const how = EVIDENCE_TH[from];
+      st.append(" ", Object.assign(document.createElement("span"), { className: `slot-how how-${from}`, textContent: `${how.icon} ${how.text}`, title: how.title }));
+    }
     if (result) st.append(Object.assign(document.createElement("small"), { className: "frame-stamp", textContent: `#${result.id} · ${(result.time / 1000).toFixed(2)} s` }));
     const del = document.createElement("td");
     del.className = "num";
@@ -437,27 +454,29 @@ async function findSlots(ask = true) {
     detectionFrame = f;
     frame = await captured.bitmap;
     assertCurrent(f);
-    flow.round(null);
+    flow.start({ phase: "find", kicker: "กำลังหาช่อง", title: "หาช่องอัตโนมัติ", mode: "ภาพเดียว · ใช้ตอนชั้นเต็ม", meta: "" });
     await step("กำลังหาสินค้าในภาพ…", 0, 1);
     const conf = Number(ui.conf.value);
     const classes = agent.manifest.model.classes;
     // no shelfOnly: names from the 110-class model + "product" boxes of the shelf model
-    const r = await detectShown(frame, { conf }, { phase: "find", step: 0, title: "หาสินค้าทุกชิ้นในภาพ", target: "ภาพเต็ม", area: [0, 0, 1, 1], full: true }, f);
+    const r = await detectShown(frame, { conf }, { phase: "find", step: 0, title: "ส่งภาพเต็มให้ agent", area: [0, 0, 1, 1], full: true }, f);
     snapshotBoxes = r.boxes;
     liveBoxes = { boxes: r.boxes, frame: f };
     drawOverlay();
     const items = toFoundItems(r.boxes, classes, r.width, r.height);
-    decide(foundVerdict(items.length), f);
+    stepDone(0, foundVerdict(items.length), f);
     for (const it of items) it.look = itemLook(frame, it.xyxy);
     const toName = items.slice(0, MAX_NAME_CROPS);
+    let widened = 0;
     for (const [k, it] of toName.entries()) {
       await step(`กำลังระบุชื่อสินค้า ${k + 1} / ${toName.length}…`, k, toName.length);
       for (const [p, pad] of NAME_PADS.entries()) { // a wider crop when the first one gives no confident name
+        if (p) widened++;
         const cr = cropRect(it.xyxy, r.width, r.height, pad);
         const crop = await createImageBitmap(frame!, ...cr);
         try {
           const area: Rect = [cr[0] / r.width, cr[1] / r.height, cr[2] / r.width, cr[3] / r.height];
-          const c = await detectShown(crop, { conf: Math.max(conf, NAME_CONF) }, { phase: "find", step: 1, title: `ระบุชื่อสินค้า ชิ้นที่ ${k + 1} / ${toName.length}`, target: p ? "ครอปกว้างขึ้น" : "ครอปรอบสินค้า", area }, f);
+          const c = await detectShown(crop, { conf: Math.max(conf, NAME_CONF) }, { phase: "find", step: 1, title: `ระบุชื่อชิ้นที่ ${k + 1} / ${toName.length}${p ? " · ครอปกว้างขึ้น" : ""}`, area, progress: [k + 1, toName.length] }, f);
           it.name = cropLabel(c.boxes, classes, c.width, c.height);
           decide(nameVerdict(it.name, topNameConf(c.boxes, classes), p === NAME_PADS.length - 1), f);
         } finally {
@@ -466,6 +485,7 @@ async function findSlots(ask = true) {
         if (it.name) break;
       }
     }
+    stepDone(1, namedVerdict(toName.length, toName.filter((i) => i.name !== null).length, widened, items.length - toName.length), f);
     // The shelf is full now, so a slot the watch loop would already call empty (a stray box in the
     // background, a product cut by the frame edge) would only raise a false alarm: drop it.
     const found = [];
@@ -474,7 +494,7 @@ async function findSlots(ask = true) {
       await step(`กำลังตรวจช่อง ${k + 1} / ${candidates.length}…`, k, candidates.length);
       const crop = await cropSlot(frame!, candidate.rect);
       try {
-        const c = await detectShown(crop, { conf, shelfOnly: true }, { phase: "find", step: 2, title: `ยืนยันช่อง “${candidate.name}” (${k + 1} / ${candidates.length})`, target: "ครอปช่อง", area: candidate.rect }, f);
+        const c = await detectShown(crop, { conf, shelfOnly: true }, { phase: "find", step: 2, title: `ยืนยันช่อง “${candidate.name}” (${k + 1} / ${candidates.length})`, area: candidate.rect, progress: [k + 1, candidates.length] }, f);
         const has = slotHasProduct(c.boxes, c.width, c.height);
         if (has) found.push(candidate);
         decide(confirmVerdict(has), f);
@@ -482,9 +502,10 @@ async function findSlots(ask = true) {
         crop.close();
       }
     }
+    stepDone(2, keptVerdict(candidates.length, found.length), f);
     if (!found.length) {
       setStatus("ไม่เจอสินค้าในภาพ ลองตอนชั้นเต็ม ลดความมั่นใจขั้นต่ำ หรือลากกรอบเอง", true);
-      flow.idle("หาช่องไม่เจอ", "ลองตอนชั้นเต็ม ลดความมั่นใจขั้นต่ำ หรือลากกรอบเอง");
+      flow.idle("หาช่องไม่เจอ", "ลองตอนชั้นเต็ม ลดความมั่นใจขั้นต่ำ หรือลากกรอบเอง", jobMeta(f));
       return;
     }
     slots = found.map((f) => ({ id: crypto.randomUUID(), ...f }));
@@ -494,7 +515,7 @@ async function findSlots(ask = true) {
     const named = items.filter((i) => i.name !== null).length;
     const dropped = candidates.length - found.length;
     setStatus(`เจอ ${found.length} ช่อง จากสินค้า ${items.length} ชิ้น (รู้ชื่อ ${named} ชิ้น)${dropped ? ` · ตัด ${dropped} ช่องที่ตอนนี้ก็ดูว่างอยู่แล้ว` : ""} · ตรวจกรอบ แก้ชื่อ ลบ หรือลากเพิ่มได้ แล้วกดเริ่มเฝ้า`);
-    flow.idle(`ได้ ${found.length} ช่อง`, "พร้อมเฝ้า · กด “เริ่มเฝ้า”");
+    flow.idle(`ได้ ${found.length} ช่อง`, "พร้อมเฝ้า · กด “เริ่มเฝ้า”", jobMeta(f));
   } catch (e) {
     if (jobEpoch !== epoch) return;
     setStatus(`หาช่องไม่สำเร็จ: ${errorMessage(e)}`, true);
@@ -593,27 +614,28 @@ function slotMotion(frame: ImageBitmap, s: Slot): SlotMotion {
   return { away: false, blocked: prev !== undefined && motionScore(prev, gray) > MOTION_BLOCKED };
 }
 
-function recordSlot(s: Slot, has: boolean, blocked: boolean, cfg: { holdMs: number; clearMs: number; maxObservationGapMs: number }, f: Frame) {
+function recordSlot(s: Slot, has: boolean, blocked: boolean, cfg: { holdMs: number; clearMs: number; maxObservationGapMs: number }, f: Frame, from: Evidence) {
   const { track, event } = stepTrack(tracks.get(s.id) ?? newTrack(), has, blocked, f.time, cfg);
   tracks.set(s.id, track);
+  evidence.set(s.id, from === "away" || !blocked ? from : "blocked");
   if (blocked) blockedNow.add(s.id); else { blockedNow.delete(s.id); results.set(s.id, f); }
   if (event) logEvent(s, event, f);
   return { track, event };
 }
 
-async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdMs: number; clearMs: number; maxObservationGapMs: number }, k: number, f: Frame, motion = slotMotion(frame, s)): Promise<number> {
+async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdMs: number; clearMs: number; maxObservationGapMs: number }, progress: [number, number], f: Frame, motion = slotMotion(frame, s)): Promise<number> {
   const rect = clipRect(slotRect(s));
   if (motion.away) {
-    recordSlot(s, false, true, cfg, f);
+    recordSlot(s, false, true, cfg, f, "away");
     return 0;
   }
   const crop = await cropSlot(frame, rect);
   try {
     assertCurrent(f);
     // Only "is there a box" matters here: skip the 110-class model.
-    const r = await detectShown(crop, { conf, shelfOnly: true }, { phase: "watch", step: 1, title: `ยืนยันช่อง “${s.name}” (${k + 1} / ${slots.length})`, target: "ครอปช่องที่ยังไม่ชัด", area: rect }, f);
+    const r = await detectShown(crop, { conf, shelfOnly: true }, { phase: "watch", step: 2, title: `ครอปช่อง “${s.name}” (${progress[0]} / ${progress[1]})`, area: rect, progress }, f);
     const has = slotHasProduct(r.boxes, r.width, r.height);
-    const { track, event } = recordSlot(s, has, motion.blocked, cfg, f);
+    const { track, event } = recordSlot(s, has, motion.blocked, cfg, f, "crop");
     decide(slotVerdict(track, has, motion.blocked, event, f.time, cfg.holdMs), f);
     return r.latency_ms;
   } finally {
@@ -629,7 +651,7 @@ async function checkSlot(frame: ImageBitmap, s: Slot, conf: number, cfg: { holdM
  * is unclear for a few rounds in a row is the reference searched alone: every view the product boxes allow
  * (fitViews), the pictures pick one (refineView).
  */
-function followView(frame: ImageBitmap, r: DetectResult, f: Frame) {
+function followView(frame: ImageBitmap, r: DetectResult, f: Frame): Verdict {
   const before = view;
   const boxes = normBoxes(r.boxes, r.width, r.height);
   grayCtx.drawImage(frame, 0, 0, GRAY_W, GRAY_H);
@@ -655,7 +677,7 @@ function followView(frame: ImageBitmap, r: DetectResult, f: Frame) {
     }
   }
   setStatus(watchStatus());
-  decide(followVerdict(r.boxes.length, view.s, view !== before, lost > 0), f);
+  return followVerdict(r.boxes.length, view.s, view !== before, lost > 0);
 }
 
 function watchStatus(): string {
@@ -673,46 +695,57 @@ async function loop() {
       const captured = await capture(), f = captured.context;
       const method: Method = ui.method.value === "legacy" ? "legacy" : "full";
       let frame: ImageBitmap | null = null;
-      flow.round(++watchRound);
+      const title = roundTitle(++watchRound);
+      flow.start({ phase: "watch", kicker: "กำลังเฝ้า", title, mode: method === "full" ? "ภาพเต็ม + ครอปเฉพาะช่องที่ไม่ชัด" : "วิธีเดิม · ครอปทุกช่อง" });
       try {
         frame = await captured.bitmap;
         assertCurrent(f);
         const cfg = { holdMs: Number(ui.hold.value) * 1000, clearMs: CLEAR_MS, maxObservationGapMs: MAX_OBSERVATION_GAP_MS };
         const conf = Number(ui.conf.value);
         const fullFrame = method === "full" || ui.follow.checked
-          ? await detectShown(frame, { conf, shelfOnly: true }, { phase: "watch", step: 0, title: method === "full" ? "ตรวจภาพเต็มและตามตำแหน่งชั้น" : "เช็กว่ากล้องขยับไหม", target: "ภาพเต็ม · model ชั้นวาง", area: [0, 0, 1, 1], full: true }, f)
+          ? await detectShown(frame, { conf, shelfOnly: true }, { phase: "watch", step: 0, title: "ส่งภาพเต็มให้ model ชั้นวาง", area: [0, 0, 1, 1], full: true }, f)
           : null;
+        let camera: Verdict | null = null;
         if (fullFrame) {
+          stepDone(0, boxesVerdict(fullFrame.boxes.length), f);
           snapshotBoxes = fullFrame.boxes;
           drawSnapshot();
-          if (ui.follow.checked) followView(frame, fullFrame, f);
-        }
+          if (ui.follow.checked) camera = followView(frame, fullFrame, f);
+        } else flow.skip(0, "วิธีเดิมไม่ใช้ภาพเต็ม (ปิดกรอบตามภาพอยู่)");
         if (method === "full" && fullFrame) {
           const matches = matchFrameBoxes(fullFrame.boxes, slots, fullFrame.width, fullFrame.height, view);
           const uncertain = new Set(matches.uncertain);
           const motion = new Map<string, SlotMotion>();
+          let clear = 0, away = 0;
           for (const s of slots) {
             const state = slotMotion(frame, s);
             motion.set(s.id, state);
-            if (state.away) { uncertain.delete(s.id); recordSlot(s, false, true, cfg, f); }
-            else if (matches.matched.has(s.id)) recordSlot(s, true, state.blocked, cfg, f);
+            if (state.away) { away++; uncertain.delete(s.id); recordSlot(s, false, true, cfg, f, "away"); }
+            else if (matches.matched.has(s.id)) { clear++; recordSlot(s, true, state.blocked, cfg, f, "full"); }
             else uncertain.add(s.id);
           }
+          const blocked = [...motion.values()].filter((m) => !m.away && m.blocked).length;
+          stepDone(1, matchVerdict(clear, slots.length - away, uncertain.size, blocked, away, camera), f);
           const batch = nextFallbackSlots(slots, uncertain, fallbackCursor, slots.length);
           const fallbackStarted = performance.now();
           const processed: Slot[] = [];
           for (const [k, s] of batch.slots.entries()) {
             if (k > 0 && performance.now() - fallbackStarted >= FALLBACK_BUDGET_MS) break;
             assertCurrent(f);
-            await checkSlot(frame, s, conf, cfg, slots.indexOf(s), f, motion.get(s.id));
+            await checkSlot(frame, s, conf, cfg, [k + 1, batch.slots.length], f, motion.get(s.id));
             processed.push(s);
           }
+          for (const s of batch.slots) if (!processed.includes(s)) evidence.set(s.id, "next");
           fallbackCursor = fallbackCursorAfter(slots, processed, fallbackCursor);
+          stepDone(2, cropVerdict(processed.length, batch.slots.length), f);
         } else {
+          if (camera) stepDone(1, camera, f);
+          else flow.skip(1, "วิธีเดิมไม่จับคู่จากภาพเต็ม");
           for (const [k, s] of slots.entries()) {
             assertCurrent(f);
-            await checkSlot(frame, s, conf, cfg, k, f);
+            await checkSlot(frame, s, conf, cfg, [k + 1, slots.length], f);
           }
+          stepDone(2, cropVerdict(slots.length, slots.length, true), f);
         }
         assertCurrent(f);
         renderSlots(); drawOverlay();
@@ -721,7 +754,7 @@ async function loop() {
           const status = displayStatus(s);
           return status === "stocked" || status === "checking" || status === "out" ? status : "waiting";
         });
-        flow.roundDone(roundVerdict(statuses, slots.length - visible.length));
+        flow.roundDone(roundVerdict(statuses, slots.length - visible.length), title, jobMeta(f));
         assertCurrent(f);
         f.resultAt = performance.now();
         f.resultDelayMs = isVideoFile() ? Math.max(0, ui.video.currentTime * 1000 - f.time) : null;
