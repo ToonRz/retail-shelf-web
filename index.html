@@ -277,6 +277,138 @@
       .engine { border-left: 1px solid var(--line); }
       #pageWatch.bench { grid-template-rows: minmax(0, 1fr) auto auto auto; grid-template-areas: "stage rail" "tray rail" "flow rail" "status engine"; }
     }
+
+    /* presentation (#demo): a step bar on top, one slide at a time: visual left, talking points right */
+    .demo { display: flex; flex-direction: column; background: var(--bg); }
+    .demo:fullscreen { height: 100dvh; overflow: auto; }
+    .demo-bar { position: sticky; top: 0; z-index: 2; display: grid; gap: 8px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+    .demo-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .demo-ctl .btn { min-height: 36px; }
+    .demo-ctl .icon { min-width: 40px; padding: 0 10px; font-size: 18px; line-height: 1; }
+    .demo-clock { font-variant-numeric: tabular-nums; font-size: 14px; color: var(--muted); }
+    .demo-ctl .spacer { flex: 1; }
+    .demo-ctl label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+    .demo-steps { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; margin: 0; padding: 0; list-style: none; }
+    .demo-steps button { display: grid; gap: 5px; width: 100%; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+    .demo-steps button > span:first-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .demo-steps .track { position: relative; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+    .demo-steps .fill { position: absolute; inset: 0; background: var(--accent); transform-origin: left; transform: scaleX(0); }
+    .demo-steps [aria-current] { color: var(--ink); font-weight: 600; }
+    .demo-steps .done .fill { transform: scaleX(1); }
+
+    .slide { flex: 1; display: grid; gap: 0; min-height: 0; }
+    .slide-visual { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); place-items: center; min-height: 260px; padding: 16px; background: var(--stage); color: var(--stage-ink); overflow: hidden; --accent: var(--stage-accent); }
+    .slide-text { display: flex; flex-direction: column; gap: 12px; padding: 20px 16px 28px; background: var(--panel); min-width: 0; }
+    .slide-text h2 { font-size: 22px; line-height: 1.3; }
+    .kicker { font-size: 12px; font-weight: 700; letter-spacing: .04em; color: var(--accent); }
+    .lead { font-size: 16px; }
+    .facts { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+    .facts li { position: relative; padding-left: 16px; }
+    .facts li::before { content: ""; position: absolute; left: 2px; top: .62em; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+    .metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .metric { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+    .metric b { display: block; font-size: 22px; line-height: 1.2; font-variant-numeric: tabular-nums; }
+    .metric span { font-size: 12px; color: var(--muted); }
+    .metric.live { border-color: var(--accent); }
+    .metric.live span::before { content: "● "; color: var(--accent); }
+    .notes { margin-top: auto; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--chip); border-radius: 0 6px 6px 0; font-size: 14px; }
+    .notes::before { content: "บทพูด · "; font-weight: 700; color: var(--accent); }
+    .demo.no-notes .notes { display: none; }
+    .live-tag { position: absolute; top: 12px; right: 12px; z-index: 1; padding: 2px 10px; border-radius: 999px; background: rgb(0 0 0 / .55); color: #fff; font-size: 12px; font-weight: 600; }
+    .live-tag::before { content: "● "; color: #ff5d5d; }
+    .demo-load { color: var(--stage-muted); font-size: 14px; text-align: center; }
+
+    /* canvases: one big, or a 2×2 grid of test images */
+    .shot { display: grid; gap: 6px; justify-items: center; width: 100%; min-width: 0; }
+    .shot canvas { display: block; max-width: 100%; max-height: min(62dvh, 560px); border-radius: 6px; background: #000; }
+    .shot figcaption { font-size: 13px; color: var(--stage-muted); text-align: center; }
+    .grid4 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; width: 100%; }
+    .grid4 { justify-items: center; }
+    .grid4 canvas { max-width: 100%; max-height: max(160px, calc((100dvh - var(--top) - 160px) / 2)); }
+
+    /* overview pipeline */
+    .pipe { display: grid; gap: 10px; width: min(100%, 860px); }
+    .node { padding: 12px 14px; border: 1px solid #3a404b; border-radius: 10px; background: #1d2129; opacity: .35; transform: translateY(6px); transition: opacity .5s, transform .5s, border-color .5s; }
+    .node b { display: block; font-size: 15px; color: #fff; }
+    .node span { font-size: 13px; color: var(--stage-muted); }
+    .node.models { display: grid; gap: 8px; }
+    .node.models > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .node .model { padding: 8px 10px; border-radius: 8px; background: #262b35; }
+    .pipe .arrow { justify-self: center; width: 2px; height: 14px; background: #3a404b; transition: background-color .5s; }
+    .slide.play .node, .slide.play .arrow { animation: lit .5s ease-out both; }
+    .slide.play .pipe > :nth-child(1) { animation-delay: .1s; }
+    .slide.play .pipe > :nth-child(2) { animation-delay: .7s; }
+    .slide.play .pipe > :nth-child(3) { animation-delay: 1.2s; }
+    .slide.play .pipe > :nth-child(4) { animation-delay: 2.4s; }
+    .slide.play .pipe > :nth-child(5) { animation-delay: 2.9s; }
+    .slide.play .pipe > :nth-child(6) { animation-delay: 3.9s; }
+    .slide.play .pipe > :nth-child(7) { animation-delay: 4.4s; border-color: #ef6b6b; }
+    .slide.play .pipe > :nth-child(3) { border-color: var(--stage-accent); }
+    @keyframes lit { from { opacity: .35; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    .slide.play .pipe .arrow { animation-name: litArrow; }
+    @keyframes litArrow { from { background: #3a404b; } to { background: var(--stage-accent); } }
+
+    /* agent: the detect() pipeline with live numbers */
+    .agent-vis { display: grid; gap: 12px; width: 100%; }
+    .chain { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin: 0; padding: 0; list-style: none; counter-reset: c; }
+    .chain li { position: relative; padding: 8px 10px; border-radius: 8px; background: #1d2129; border: 1px solid #3a404b; font-size: 12px; color: var(--stage-muted); counter-increment: c; opacity: .4; transition: opacity .4s, border-color .4s; }
+    .chain li b { display: block; color: #fff; font-size: 13px; }
+    .chain li b::before { content: counter(c) " · "; color: var(--stage-accent); }
+    .chain li.on { opacity: 1; border-color: var(--stage-accent); }
+    .chain li.seen { opacity: 1; }
+    .json { flex: 0 0 auto; margin: 0; padding: 10px 12px; max-height: 180px; overflow: auto; border-radius: 8px; background: #0b0d11; color: #cfd5df; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+    .crops { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+    .crops figure { flex: 0 0 auto; display: grid; gap: 2px; margin: 0; width: 64px; opacity: .25; transition: opacity .3s; }
+    .crops figure.on { opacity: 1; }
+    .crops canvas { width: 64px; height: 64px; object-fit: contain; border-radius: 4px; background: #000; }
+    .crops figcaption { overflow: hidden; font-size: 10px; line-height: 1.3; color: var(--stage-muted); white-space: nowrap; text-overflow: ellipsis; }
+    #demoAgentCanvas { max-height: max(200px, calc(100dvh - var(--top) - 420px)); }
+    .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--stage-muted); }
+    .legend i { display: inline-block; width: 14px; height: 10px; margin-right: 6px; border: 2px solid; border-radius: 2px; vertical-align: -1px; }
+
+    /* real-use video */
+    .vid { position: relative; width: 100%; max-width: 1100px; }
+    .vid video { display: block; width: 100%; max-height: 70dvh; border-radius: 6px; background: #000; }
+    .vid-cap { position: absolute; left: 12px; right: 12px; bottom: 56px; display: flex; justify-content: center; pointer-events: none; }
+    .vid-cap p { max-width: 90%; padding: 8px 14px; border-radius: 8px; background: rgb(10 12 16 / .82); color: #fff; font-size: clamp(14px, 1.6vw, 20px); font-weight: 600; text-align: center; }
+    .vid-cap p[data-tone="bad"] { background: rgb(176 40 40 / .92); }
+    .vid-cap p[data-tone="good"] { background: rgb(26 120 70 / .92); }
+    .chapters { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+    .chapters button { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+    .chapters time { font-variant-numeric: tabular-nums; }
+    .chapters button[aria-current] { background: var(--chip); color: var(--ink); }
+    .chapters button[aria-current] .t { font-weight: 700; }
+    .chapters .bad .t { color: var(--bad); }
+    .chapters small { display: none; color: var(--muted); }
+    .chapters button[aria-current] small { display: block; }
+
+    /* summary */
+    .tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; width: min(100%, 860px); }
+    @media (min-width: 720px) { .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    .tile { padding: 16px; border-radius: 10px; background: #1d2129; border: 1px solid #3a404b; }
+    .tile b { display: block; font-size: 30px; line-height: 1.15; color: #fff; font-variant-numeric: tabular-nums; }
+    .tile span { font-size: 13px; color: var(--stage-muted); }
+    .slide-text .links { display: flex; flex-wrap: wrap; gap: 8px; }
+    .slide-text .links a.btn { display: inline-flex; align-items: center; text-decoration: none; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .slide.play .node, .slide.play .arrow { animation: none; }
+      .node { transition: none; opacity: 1; transform: none; }
+    }
+    @media (max-width: 719px) {
+      .demo-steps button > span:first-child { font-size: 11px; }
+      .chain { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .node.models > div { grid-template-columns: minmax(0, 1fr); }
+      .vid-cap { position: static; margin-top: 8px; }
+      .vid-cap p { max-width: none; }
+    }
+    @media (min-width: 900px) and (min-height: 520px) {
+      .demo { height: calc(100dvh - var(--top)); }
+      .demo:fullscreen { height: 100dvh; }
+      .slide { grid-template-columns: minmax(0, 1fr) clamp(320px, 30vw, 440px); }
+      .slide-visual { padding: 24px; }
+      .slide-text { overflow-y: auto; border-left: 1px solid var(--line); padding: 24px; }
+    }
   </style>
 </head>
 <body>
@@ -285,6 +417,7 @@
     <nav aria-label="หน้า">
       <a href="#detect" id="navDetect" aria-current="page">ตรวจจับ</a>
       <a href="#watch" id="navWatch">เฝ้าชั้นวาง</a>
+      <a href="#demo" id="navDemo">Demo</a>
       <a href="#about" id="navAbout">เกี่ยวกับ</a>
     </nav>
     <p class="promise">ตรวจจับสินค้าบนชั้นวาง 110 ชนิด · model รันใน browser รูปไม่ถูกส่งออกจากเครื่อง</p>
@@ -467,6 +600,167 @@
       <p class="status" id="watchStatus" role="status" aria-live="polite">กำลังเตรียม…</p>
       <span class="meta" id="watchPill">agent …</span>
     </div>
+  </main>
+
+  <main id="pageDemo" class="demo" hidden aria-label="Demo สำหรับนำเสนอ">
+    <div class="demo-bar">
+      <div class="demo-ctl">
+        <button class="btn" id="demoPlay" type="button">▶ เริ่มนำเสนอ</button>
+        <button class="btn ghost icon" id="demoPrev" type="button" aria-label="ขั้นก่อนหน้า" title="ขั้นก่อนหน้า (←)">‹</button>
+        <button class="btn ghost icon" id="demoNext" type="button" aria-label="ขั้นถัดไป" title="ขั้นถัดไป (→)">›</button>
+        <span class="demo-clock" id="demoClock">0:00 / 1:50</span>
+        <span class="spacer"></span>
+        <label><input id="demoNotes" type="checkbox" checked> บทพูด</label>
+        <button class="btn ghost" id="demoFull" type="button" title="เต็มจอ (F)">เต็มจอ</button>
+      </div>
+      <ol class="demo-steps" id="demoSteps" aria-label="ขั้นของการนำเสนอ"></ol>
+    </div>
+
+    <section class="slide" data-step="overview" aria-label="ภาพรวม">
+      <div class="slide-visual">
+        <div class="pipe" aria-label="การไหลของข้อมูล">
+          <div class="node"><b>รูป / วิดีโอ / กล้อง</b><span>ภาพไม่ถูกส่งออกจากเครื่อง</span></div>
+          <div class="arrow"></div>
+          <div class="node models">
+            <b>Agent · <code id="demoAgentName">shelf-agent.js</code></b>
+            <div>
+              <div class="model"><b>Model ชื่อสินค้า</b><span>YOLOv8n · 110 คลาส · Sell Products</span></div>
+              <div class="model"><b>Model ชั้นวาง</b><span>YOLOv8n · 1 คลาส "product" · SKU-110K</span></div>
+            </div>
+            <span>onnxruntime-web · WebGPU หรือ WASM · เรียกผ่าน <code>detect()</code> ฟังก์ชันเดียว</span>
+          </div>
+          <div class="arrow"></div>
+          <div class="node"><b>เว็บ</b><span>วาดกรอบ · นับสินค้าต่อชนิด · จับคู่กล่องกับช่อง · จับเวลาช่องว่าง</span></div>
+          <div class="arrow"></div>
+          <div class="node"><b>แจ้งเตือน "ของหมด"</b><span>แถบแดง + เสียง + notification ของ browser</span></div>
+        </div>
+      </div>
+      <div class="slide-text">
+        <p class="kicker">1 / 6 · ภาพรวม</p>
+        <h2>ตรวจสินค้าบนชั้นวาง และเตือนเมื่อของหมด ทั้งหมดรันใน browser</h2>
+        <ul class="facts">
+          <li>มี 2 model (YOLOv8n) อยู่ใน agent ตัวเดียว</li>
+          <li>เว็บคุยกับ agent ผ่าน <code>detect(ภาพ)</code> อย่างเดียว ได้กล่อง + ชื่อสินค้า + ความมั่นใจ</li>
+          <li>ไม่มี server · host บน GitHub Pages · ใช้ได้ทั้งคอมและมือถือ</li>
+        </ul>
+        <p class="notes">ระบบมี 3 ส่วน: model ที่เทรนเอง, agent ที่ห่อ model ให้รันใน browser และเว็บที่เอาผลไปใช้ ขั้นต่อไปจะให้ดูทีละ model ที่รันสดในเครื่องนี้</p>
+      </div>
+    </section>
+
+    <section class="slide" data-step="primary" aria-label="Model ชื่อสินค้า" hidden>
+      <div class="slide-visual">
+        <span class="live-tag" id="demoLive1">ตรวจสดในเครื่องนี้</span>
+        <div class="grid4" id="demoPrimaryGrid"><p class="demo-load">กำลังโหลด model…</p></div>
+      </div>
+      <div class="slide-text">
+        <p class="kicker">2 / 6 · Model ที่ 1</p>
+        <h2>Model ชื่อสินค้า: บอกว่าเป็นสินค้าอะไร 110 ชนิด</h2>
+        <p class="lead">YOLOv8n เทรนบน dataset Sell Products (O2O Minimart) · รูป 4 รูปนี้มาจาก test set ซึ่ง model ไม่เคยเห็นตอนเทรน</p>
+        <div class="metrics">
+          <div class="metric"><b>0.983</b><span>mAP@0.5 (test 567 รูป)</span></div>
+          <div class="metric"><b>0.980</b><span>Box F1</span></div>
+          <div class="metric"><b>6.3 MB</b><span>ขนาด model</span></div>
+          <div class="metric live"><b id="demoPrimaryMs">–</b><span>ms/รูป ในเครื่องนี้ (detect เต็ม 2 model)</span></div>
+        </div>
+        <p class="muted" id="demoPrimaryNote">กรอบสีต่างกันตามชนิดสินค้า ตัวเลขคือความมั่นใจ</p>
+        <p class="notes">model ตัวแรกตั้งชื่อสินค้าได้แม่นมาก แต่รู้จักแค่ 110 ชนิดที่อยู่ใน dataset ถ้าเป็นสินค้าที่ไม่เคยเห็นจะหาไม่เจอ จึงต้องมี model ตัวที่สอง</p>
+      </div>
+    </section>
+
+    <section class="slide" data-step="shelf" aria-label="Model ชั้นวาง" hidden>
+      <div class="slide-visual">
+        <span class="live-tag">ตรวจสดในเครื่องนี้ · shelfOnly</span>
+        <figure class="shot"><canvas id="demoShelfCanvas" aria-label="ผลของ model ชั้นวาง"></canvas><figcaption id="demoShelfCap">กำลังโหลด model…</figcaption></figure>
+      </div>
+      <div class="slide-text">
+        <p class="kicker">3 / 6 · Model ที่ 2</p>
+        <h2>Model ชั้นวาง: บอกว่า "มีสินค้าอยู่ตรงนี้" ไม่สนว่าเป็นอะไร</h2>
+        <p class="lead">YOLOv8n คลาสเดียว (<code>product</code>) เทรนบน SKU-110K รูปชั้นวางจริงที่สินค้าแน่นมาก · ใช้เฝ้าว่าช่องไหนว่าง</p>
+        <div class="metrics">
+          <div class="metric"><b>0.927</b><span>mAP@0.5 (test 5,861 tile)</span></div>
+          <div class="metric"><b>0.885</b><span>Precision</span></div>
+          <div class="metric"><b>0.858</b><span>Recall</span></div>
+          <div class="metric live"><b id="demoShelfMs">–</b><span>ms/รูป ในเครื่องนี้ (shelfOnly)</span></div>
+        </div>
+        <p class="notes">ภาพนี้คือเฟรมแรกของวิดีโอชั้นวางที่จะใช้ตอนท้าย model ตัวนี้เจอทุกชิ้นโดยไม่ต้องรู้ชื่อ จึงใช้กับสินค้าอะไรก็ได้ และเร็วกว่าเพราะรันแค่ model เดียว</p>
+      </div>
+    </section>
+
+    <section class="slide" data-step="agent" aria-label="Agent" hidden>
+      <div class="slide-visual">
+        <div class="agent-vis">
+          <ol class="chain" id="demoChain">
+            <li><b>ภาพเต็ม → detect()</b><span id="demoChainFound">model ชั้นวางหาสินค้าทุกชิ้น</span></li>
+            <li><b>ครอปทีละชิ้น</b><span id="demoChainCrop">ขยายขอบ 15%</span></li>
+            <li><b>ครอป → detect()</b><span id="demoChainNamed">model ชื่อสินค้าตั้งชื่อ</span></li>
+            <li><b>รวมเป็นช่อง</b><span id="demoChainSlots">ชื่อเดียวกันที่ติดกัน = 1 ช่อง</span></li>
+            <li><b>เฝ้า → เตือน</b>detect(ภาพ, {shelfOnly}) ทุก 1 วิ</li>
+          </ol>
+          <figure class="shot"><canvas id="demoAgentCanvas" aria-label="ผลของ agent: สินค้าแต่ละชิ้นและช่องที่ได้"></canvas>
+            <figcaption class="legend"><span>● ตรวจสดในเครื่องนี้</span><span><i style="border-color:#c9ced6;border-style:dashed"></i>model ชั้นวางเจอ (ยังไม่รู้ชื่อ)</span><span><i style="border-color:#2fb36b"></i>ชื่อจากครอป (สีตามชนิด)</span><span><i style="border-color:#ffd166;border-width:3px"></i>ช่องที่จะเฝ้า</span></figcaption></figure>
+          <div class="crops" id="demoCrops" aria-label="ครอปของแต่ละชิ้นและชื่อที่ได้"></div>
+        </div>
+      </div>
+      <div class="slide-text">
+        <p class="kicker">4 / 6 · Agent</p>
+        <h2>Agent รวม 2 model ไว้หลัง <code>detect()</code> เดียว</h2>
+        <ul class="facts">
+          <li>ตอนโหลดตรวจเวอร์ชัน, contract และ sha256 ของ model ถ้าไม่ตรงไม่ยอมรัน</li>
+          <li><code>detect(ภาพ)</code> รันทั้งสอง model: ถ้า model 110 คลาสรู้จักได้ชื่อสินค้า ถ้าไม่รู้จักแต่ model ชั้นวางเจอได้ <code>product</code></li>
+          <li>ภาพทั้งชั้นสินค้าแต่ละชิ้นเล็กเกินจะตั้งชื่อ จึงครอปทีละชิ้นส่งให้ <code>detect()</code> อีกรอบ: <span id="demoAgentSummary">…</span></li>
+          <li>ตอนเฝ้าใช้ <code>{shelfOnly: true}</code> รันแค่ model ชั้นวาง เร็วขึ้นราว 2 เท่า</li>
+        </ul>
+        <div class="metrics">
+          <div class="metric live"><b id="demoAgentNamed">–</b><span>ชิ้นที่ได้ชื่อ</span></div>
+          <div class="metric live"><b id="demoAgentSlots">–</b><span>ช่องที่ได้</span></div>
+          <div class="metric live"><b id="demoAgentMs">–</b><span>ms ทั้งหมด (<span id="demoAgentCalls">–</span> calls)</span></div>
+          <div class="metric"><b id="demoBackend">–</b><span>backend</span></div>
+        </div>
+        <pre class="json" id="demoJson" aria-label="ผลที่ agent ส่งกลับของครอปแรก (DetectResult)">กำลังโหลด model…</pre>
+        <p class="notes">agent คือตัวกลางระหว่าง model กับเว็บ เว็บแค่เรียก detect() แล้วได้ JSON กลับมา ขั้นนี้คือสิ่งที่ปุ่ม "หาช่องอัตโนมัติ" ทำจริง: หาสินค้าทุกชิ้น ครอปให้ model ตั้งชื่อ แล้วรวมเป็นช่องที่จะเฝ้า</p>
+      </div>
+    </section>
+
+    <section class="slide" data-step="video" aria-label="ตัวอย่างการใช้งานจริง" hidden>
+      <div class="slide-visual">
+        <div class="vid">
+          <video id="demoVideo" preload="none" playsinline muted controls aria-label="วิดีโอบันทึกหน้าจอ: หน้าเฝ้าชั้นวางทำงานกับวิดีโอทดสอบ"></video>
+          <div class="vid-cap" aria-live="polite"><p id="demoCap" data-tone="info">หาช่องอัตโนมัติ</p></div>
+        </div>
+      </div>
+      <div class="slide-text">
+        <p class="kicker">5 / 6 · ตัวอย่างการใช้งานจริง</p>
+        <h2>เฝ้าชั้นวางจากวิดีโอ แล้วเตือนเมื่อของหมด</h2>
+        <p class="muted">บันทึกหน้าจอเว็บนี้จริง (agent v0.3.2, WASM) กับวิดีโอทดสอบ 2 นาที เร่ง 3 เท่า · เตือนเมื่อว่าง 15 วินาที · กดหัวข้อเพื่อข้ามไปได้</p>
+        <ol class="chapters" id="demoChapters"></ol>
+        <p class="notes">ตอนแรก agent ใช้ทั้ง 2 model หาช่องเองจากภาพชั้นเต็ม จากนั้นเฝ้าด้วย model ชั้นวางทุกวินาที ผลคือเตือนครบ 3 ช่องที่ของหมดจริง ไม่มีเตือนผิด แม้มีคนเดินผ่าน</p>
+      </div>
+    </section>
+
+    <section class="slide" data-step="summary" aria-label="สรุป" hidden>
+      <div class="slide-visual">
+        <div class="tiles">
+          <div class="tile"><b>0.983</b><span>mAP@0.5 model ชื่อสินค้า (110 คลาส)</span></div>
+          <div class="tile"><b>0.927</b><span>mAP@0.5 model ชั้นวาง (SKU-110K)</span></div>
+          <div class="tile"><b id="demoSumMs">–</b><span>ms ต่อรูปในเครื่องนี้ ตอนเฝ้า (shelfOnly)</span></div>
+          <div class="tile"><b>3 / 3</b><span>ช่องของหมดที่เตือนถูก ในวิดีโอทดสอบ · เตือนผิด 0</span></div>
+          <div class="tile"><b>~56 MB</b><span>agent + 2 model โหลดครั้งเดียว ไม่มี server</span></div>
+          <div class="tile"><b>6 / 6</b><span>ช่องที่หาเองได้ชื่อถูก</span></div>
+        </div>
+      </div>
+      <div class="slide-text">
+        <p class="kicker">6 / 6 · สรุป</p>
+        <h2>ใช้งานได้จริงใน browser ทั้งคอมและมือถือ</h2>
+        <ul class="facts">
+          <li>Model ชื่อสินค้า: แม่นสูงกับ 110 ชนิดที่เทรน</li>
+          <li>Model ชั้นวาง: เจอสินค้าทุกชนิด ใช้เฝ้าช่องว่าง</li>
+          <li>Agent: รวมสอง model ตรวจความถูกต้องของไฟล์ และ pin เวอร์ชันกับเว็บ</li>
+          <li>ยังไม่ได้ทดสอบ: ชั้นวางและกล้องจริงในร้าน</li>
+        </ul>
+        <div class="links"><a class="btn" href="#detect">ลองตรวจจับ</a><a class="btn ghost" href="#watch">ลองเฝ้าชั้นวาง</a></div>
+        <p class="notes">สรุปคือ 2 model ทำงานเสริมกัน: ตัวหนึ่งบอกชื่อ ตัวหนึ่งบอกว่ามีของไหม agent รวมให้ใช้ง่าย และเว็บเอาไปเตือนของหมดได้จริง</p>
+      </div>
+    </section>
   </main>
 
   <main id="pageAbout" class="doc" hidden>
